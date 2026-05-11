@@ -108,7 +108,10 @@ function Refresh-Path {
 }
 
 function Ensure-Git {
-    if (Get-Command git -ErrorAction SilentlyContinue) { return }
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        OK "git found: $((git --version) 2>&1) (already installed - skipping)"
+        return
+    }
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
         Die "git is required and winget isn't available. Install git from https://git-scm.com/download/win"
     }
@@ -123,13 +126,18 @@ function Ensure-Git {
 
 function Ensure-Node {
     if ((Get-Command node -ErrorAction SilentlyContinue) -and (Get-Command npx -ErrorAction SilentlyContinue)) {
-        OK "Node.js found: $((node -v) 2>&1)"
-        return
+        $ver = (node -v) -replace '^v', ''
+        $major = [int]($ver -split '\.')[0]
+        if ($major -ge 18) {
+            OK "Node.js found: v$ver (already installed - skipping)"
+            return
+        }
+        Warn "Node.js v$ver is too old; mcp-remote requires v18+. Upgrading..."
     }
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        Die "Node.js + npx required and winget isn't available. Install Node.js LTS from https://nodejs.org/"
+        Die "Node.js v18+ required and winget isn't available. Install Node.js LTS from https://nodejs.org/"
     }
-    Say "Node.js not found - installing via winget (this can take 1-2 minutes)..."
+    Say "Installing Node.js LTS via winget (this can take 1-2 minutes)..."
     winget install --silent --accept-source-agreements --accept-package-agreements --id OpenJS.NodeJS.LTS 2>&1 | Out-Null
     Refresh-Path
     if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
@@ -140,7 +148,7 @@ function Ensure-Node {
 
 function Ensure-ClaudeCLI {
     if (Get-Command claude -ErrorAction SilentlyContinue) {
-        OK "Claude Code CLI found: $((claude --version) 2>&1 | Select-Object -First 1)"
+        OK "Claude Code CLI found: $((claude --version) 2>&1 | Select-Object -First 1) (already installed - skipping)"
         return
     }
     Say "Claude Code CLI not found - installing globally via npm..."
@@ -154,9 +162,45 @@ function Ensure-ClaudeCLI {
     }
 }
 
+function Ensure-ClaudeDesktop {
+    # Heuristic: known install paths. Claude Desktop on Windows installs to
+    # %LOCALAPPDATA%\AnthropicClaude\ or under Program Files. We don't
+    # strictly need the binary location - we just need the config dir,
+    # which Claude creates on first launch. We force-create it later (in
+    # the configure step) so our MCP entry is ready before the user even
+    # opens Claude.
+    $cfgDir = Join-Path $env:APPDATA "Claude"
+    $alreadyInstalled = $false
+    foreach ($p in @(
+        (Join-Path $env:LOCALAPPDATA "AnthropicClaude\Claude.exe"),
+        (Join-Path $env:LOCALAPPDATA "Programs\Claude\Claude.exe"),
+        "C:\Program Files\Claude\Claude.exe"
+    )) {
+        if (Test-Path $p) { $alreadyInstalled = $true; break }
+    }
+    if ($alreadyInstalled -or (Test-Path $cfgDir)) {
+        OK "Claude Desktop found (already installed - skipping)"
+        return
+    }
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Warn "Claude Desktop not installed and winget unavailable - skipping."
+        Warn "  Install manually from https://claude.ai/download"
+        return
+    }
+    Say "Claude Desktop not found - installing via winget..."
+    winget install --silent --accept-source-agreements --accept-package-agreements --id Anthropic.Claude --scope user 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Warn "winget install Anthropic.Claude failed (package may have been renamed)."
+        Warn "  Install manually from https://claude.ai/download"
+        return
+    }
+    OK "Claude Desktop installed"
+}
+
 Ensure-Git
 Ensure-Node
 Ensure-ClaudeCLI
+Ensure-ClaudeDesktop
 
 
 # ---------- 1. device flow ----------

@@ -59,8 +59,12 @@ esac
 
 ensure_node() {
   if command -v node >/dev/null 2>&1 && command -v npx >/dev/null 2>&1; then
-    ok "Node.js found: $(node -v)"
-    return 0
+    NODE_MAJOR=$(node -v | sed 's/^v\([0-9]*\)\..*/\1/')
+    if [ -n "$NODE_MAJOR" ] && [ "$NODE_MAJOR" -ge 18 ] 2>/dev/null; then
+      ok "Node.js found: $(node -v) (already installed - skipping)"
+      return 0
+    fi
+    warn "Node.js $(node -v) is too old; mcp-remote requires v18+. Upgrading..."
   fi
   say "Node.js not found - installing automatically..."
   case "$OS" in
@@ -101,7 +105,7 @@ Then re-run this installer."
 
 ensure_claude_cli() {
   if command -v claude >/dev/null 2>&1; then
-    ok "Claude Code CLI found: $(claude --version 2>/dev/null | head -1)"
+    ok "Claude Code CLI found: $(claude --version 2>/dev/null | head -1) (already installed - skipping)"
     return 0
   fi
   say "Claude Code CLI not found - installing globally via npm..."
@@ -124,8 +128,36 @@ ensure_claude_cli() {
   fi
 }
 
+ensure_claude_desktop() {
+  case "$OS" in
+    Darwin)
+      if [ -d "/Applications/Claude.app" ]; then
+        ok "Claude Desktop found (/Applications/Claude.app - already installed, skipping)"
+        return 0
+      fi
+      if ! command -v brew >/dev/null 2>&1; then
+        warn "Claude Desktop not installed and Homebrew unavailable - skipping."
+        warn "  Install manually from https://claude.ai/download if you want the GUI."
+        return 0
+      fi
+      say "Claude Desktop not found - installing via brew cask..."
+      if brew install --cask claude >/dev/null 2>&1; then
+        ok "Claude Desktop installed (/Applications/Claude.app)"
+      else
+        warn "brew install --cask claude failed (cask may have been renamed)."
+        warn "  Install manually from https://claude.ai/download"
+      fi
+      ;;
+    Linux)
+      # Claude Desktop has no official Linux build yet; CLI is the only path.
+      :
+      ;;
+  esac
+}
+
 ensure_node
 ensure_claude_cli
+ensure_claude_desktop
 
 # ---------- 1. device flow ----------
 say "═══ Tedplatform Claude installer ═══"
@@ -238,13 +270,27 @@ rm -rf "$TMP"
 ok "Skill installed: $SKILL_DIR"
 
 # ---------- 4. configure Claude Desktop ----------
+# Detect Claude Desktop by the app bundle (Mac) rather than the config dir,
+# since Claude only creates the config dir on first launch. We installed
+# the app in step 0; create the config dir ourselves so the MCP entry is
+# in place BEFORE the user first opens Claude.
 case "$OS" in
-  Darwin) DESKTOP_DIR="$HOME/Library/Application Support/Claude" ;;
-  Linux)  DESKTOP_DIR="$HOME/.config/Claude" ;;
+  Darwin)
+    DESKTOP_DIR="$HOME/Library/Application Support/Claude"
+    DESKTOP_PRESENT=0
+    [ -d "/Applications/Claude.app" ] && DESKTOP_PRESENT=1
+    ;;
+  Linux)
+    DESKTOP_DIR="$HOME/.config/Claude"
+    DESKTOP_PRESENT=0
+    # No official Linux build yet. If user side-loaded one, the config dir
+    # being present is the only signal we have.
+    [ -d "$DESKTOP_DIR" ] && DESKTOP_PRESENT=1
+    ;;
 esac
 DESKTOP_CFG="$DESKTOP_DIR/claude_desktop_config.json"
 
-if [ -d "$DESKTOP_DIR" ]; then
+if [ "$DESKTOP_PRESENT" = "1" ]; then
   mkdir -p "$DESKTOP_DIR"
   [ -f "$DESKTOP_CFG" ] || echo '{}' > "$DESKTOP_CFG"
   python3 - <<PY
@@ -266,7 +312,7 @@ PY
   ok "Claude Desktop configured: $DESKTOP_CFG"
   DESKTOP_CONFIGURED=1
 else
-  warn "Claude Desktop not detected (no $DESKTOP_DIR). Skipping Desktop config."
+  warn "Claude Desktop not present - skipping Desktop config."
   DESKTOP_CONFIGURED=0
 fi
 
