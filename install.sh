@@ -39,6 +39,35 @@ warn() { printf "\033[33m! %s\033[0m\n" "$*"; }
 die()  { printf "\033[31m✗ %s\033[0m\n" "$*" >&2; exit 1; }
 
 need() { command -v "$1" >/dev/null || die "Required: $1 (install with brew/apt)"; }
+
+# Skill-only refresh path — for when only SKILL.md needs to roll out
+# (e.g. MCP gained new tools and the workflow doc must teach them).
+# Skips OAuth, refresh-token cache, launcher, and Claude config; only
+# pulls the repo and overwrites the local skill copy.
+#   curl -sSL https://raw.githubusercontent.com/grknatabay/tedplatform-claude/main/install.sh | bash -s -- --skill-only
+SKILL_ONLY=0
+for arg in "$@"; do
+  case "$arg" in
+    --skill-only) SKILL_ONLY=1 ;;
+  esac
+done
+if [ "$SKILL_ONLY" = "1" ]; then
+  need git
+  say "Skill-only refresh — re-pulling tedplatform-publish skill from main."
+  mkdir -p "$(dirname "$SKILL_DIR")"
+  TMP=$(mktemp -d)
+  git clone -q --depth 1 "$INSTALL_REPO_GIT" "$TMP/repo" || die "Clone failed"
+  [ -f "$TMP/repo/skills/tedplatform-publish/SKILL.md" ] || die "Repo missing skills/tedplatform-publish/SKILL.md"
+  rm -rf "$SKILL_DIR"
+  cp -r "$TMP/repo/skills/tedplatform-publish" "$SKILL_DIR"
+  rm -rf "$TMP"
+  ok "Skill refreshed: $SKILL_DIR"
+  echo ""
+  echo "  Restart Claude Desktop to pick up the new skill instructions."
+  echo ""
+  exit 0
+fi
+
 need curl
 need jq
 need python3

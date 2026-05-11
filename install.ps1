@@ -62,6 +62,29 @@ $SKILL_DIR = Join-Path $env:USERPROFILE ".claude\skills\tedplatform-publish"
 function Say  ($m) { Write-Host $m -ForegroundColor Cyan }
 function OK   ($m) { Write-Host "[OK] $m" -ForegroundColor Green }
 function Warn ($m) { Write-Host "[!]  $m" -ForegroundColor Yellow }
+
+# Skill-only refresh — for when the only change in a release is the skill
+# (e.g. MCP server got new tools and the SKILL.md needs to teach Claude
+# Desktop the new flow). Skips OAuth, refresh-token cache, launcher, and
+# Claude config — just pulls the latest skill from the repo and overwrites
+# the local copy. Trigger via:
+#   $env:TEDPLATFORM_SKILL_ONLY=1; iwr -useb https://raw.githubusercontent.com/grknatabay/tedplatform-claude/main/install.ps1 | iex
+if ($env:TEDPLATFORM_SKILL_ONLY -eq "1") {
+    Say "Skill-only refresh — re-pulling tedplatform-publish skill from main."
+    $skillParent = Split-Path $SKILL_DIR -Parent
+    if (-not (Test-Path $skillParent)) { New-Item -ItemType Directory -Path $skillParent -Force | Out-Null }
+    $tmp = Join-Path $env:TEMP ("tedclaude-skillonly-" + [guid]::NewGuid().ToString("N"))
+    git clone -q --depth 1 $REPO_GIT $tmp 2>&1 | Out-Null
+    if (-not (Test-Path "$tmp\skills\tedplatform-publish\SKILL.md")) { Die "Repo missing skills/tedplatform-publish/SKILL.md — clone failed?" }
+    if (Test-Path $SKILL_DIR) { Remove-Item -Recurse -Force $SKILL_DIR }
+    Copy-Item -Recurse "$tmp\skills\tedplatform-publish" $SKILL_DIR
+    Remove-Item -Recurse -Force $tmp
+    OK "Skill refreshed: $SKILL_DIR"
+    Write-Host ""
+    Write-Host "  Restart Claude Desktop to pick up the new skill instructions." -ForegroundColor Yellow
+    Write-Host ""
+    return
+}
 # Die throws a terminating error rather than calling `exit 1`. When this
 # script is run via `iwr | iex` (the documented install path), `exit` would
 # terminate the HOST PowerShell window; `throw` bubbles up to the top-level
