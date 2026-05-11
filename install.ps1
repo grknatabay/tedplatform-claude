@@ -20,6 +20,19 @@
 
 $ErrorActionPreference = "Stop"
 
+# Force UTF-8 console output. Windows PowerShell 5.1 defaults to the legacy
+# OEM code page (cp1252 on most systems) which renders box-drawing chars
+# and emoji as `?`. PS 7+ already defaults to UTF-8. Best-effort: skip on
+# error rather than abort — the script still works, just with mojibake.
+try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $OutputEncoding           = [System.Text.Encoding]::UTF8
+} catch { }
+
+# ASCII-friendly UI characters. PS 5.1 + cp1252 console can't render the
+# unicode box-drawing set even with UTF-8 encoding (font fallback limit),
+# so we use the lowest common denominator everywhere.
+
 # Top-level trap: any uncaught throw (e.g. from Die) prints the message
 # in red and pauses for input. Without this, an `iwr | iex` run that hits
 # an error would unwind back to the host PowerShell, which on Windows
@@ -27,7 +40,7 @@ $ErrorActionPreference = "Stop"
 # no diagnostic.
 trap {
     Write-Host ""
-    Write-Host "✗ $_" -ForegroundColor Red
+    Write-Host "[X] $_" -ForegroundColor Red
     Write-Host ""
     Write-Host "  Re-run the installer after fixing the issue:" -ForegroundColor Yellow
     Write-Host "    iwr -useb https://raw.githubusercontent.com/grknatabay/tedplatform-claude/main/install.ps1 | iex" -ForegroundColor Yellow
@@ -47,8 +60,8 @@ $DOTDIR    = Join-Path $env:USERPROFILE ".tedplatform"
 $SKILL_DIR = Join-Path $env:USERPROFILE ".claude\skills\tedplatform-publish"
 
 function Say  ($m) { Write-Host $m -ForegroundColor Cyan }
-function OK   ($m) { Write-Host "✓ $m" -ForegroundColor Green }
-function Warn ($m) { Write-Host "! $m" -ForegroundColor Yellow }
+function OK   ($m) { Write-Host "[OK] $m" -ForegroundColor Green }
+function Warn ($m) { Write-Host "[!]  $m" -ForegroundColor Yellow }
 # Die throws a terminating error rather than calling `exit 1`. When this
 # script is run via `iwr | iex` (the documented install path), `exit` would
 # terminate the HOST PowerShell window; `throw` bubbles up to the top-level
@@ -96,8 +109,8 @@ if (-not (Get-Command npx -ErrorAction SilentlyContinue)) {
 }
 
 # ---------- 1. device flow ----------
-Say "═══ Tedplatform Claude installer ═══"
-Say "Starting browser-based login (Keycloak device code)…"
+Say "=== Tedplatform Claude installer ==="
+Say "Starting browser-based login (Keycloak device code)..."
 
 if (-not (Test-Path $DOTDIR)) { New-Item -ItemType Directory -Path $DOTDIR -Force | Out-Null }
 
@@ -117,20 +130,20 @@ $EXPIRES_IN  = $deviceResp.expires_in
 if (-not $DEVICE_CODE) { Die "Device flow failed: $($deviceResp | ConvertTo-Json)" }
 
 Write-Host ""
-Write-Host "   ┌────────────────────────────────────────────────────┐" -ForegroundColor White
-Write-Host "   │  Open the following URL in your browser:           │" -ForegroundColor White
-Write-Host "   │                                                    │" -ForegroundColor White
-Write-Host "   │  $VERIFY_URL"                                          -ForegroundColor White
-Write-Host "   │                                                    │" -ForegroundColor White
-Write-Host "   │  Verification code: $USER_CODE                          │" -ForegroundColor White
-Write-Host "   │                                                    │" -ForegroundColor White
-Write-Host "   │  Login with your account, then click 'Yes' / 'Allow'│" -ForegroundColor White
-Write-Host "   └────────────────────────────────────────────────────┘" -ForegroundColor White
+Write-Host "   +------------------------------------------------------------+" -ForegroundColor White
+Write-Host "   |  Open the following URL in your browser:                   |" -ForegroundColor White
+Write-Host "   |                                                            |" -ForegroundColor White
+Write-Host "   |  $VERIFY_URL"                                                  -ForegroundColor White
+Write-Host "   |                                                            |" -ForegroundColor White
+Write-Host "   |  Verification code: $USER_CODE                                  |" -ForegroundColor White
+Write-Host "   |                                                            |" -ForegroundColor White
+Write-Host "   |  Login with your account, then click 'Yes' / 'Allow'       |" -ForegroundColor White
+Write-Host "   +------------------------------------------------------------+" -ForegroundColor White
 Write-Host ""
 
 try { Start-Process $VERIFY_URL } catch { Warn "Could not auto-open browser. Copy the URL above." }
 
-Say "Waiting for browser approval (timeout ${EXPIRES_IN}s)…"
+Say "Waiting for browser approval (timeout ${EXPIRES_IN}s)..."
 $deadline = (Get-Date).AddSeconds($EXPIRES_IN)
 $ACCESS = $null
 $REFRESH = $null
@@ -197,7 +210,7 @@ Set-Content -Path "$DOTDIR\get-mcp-token.ps1" -Value $tokenScript -Encoding UTF8
 OK "Token refresher: $DOTDIR\get-mcp-token.ps1"
 
 # ---------- 3. install skill ----------
-Say "Installing tedplatform-publish skill…"
+Say "Installing tedplatform-publish skill..."
 $skillParent = Split-Path $SKILL_DIR -Parent
 if (-not (Test-Path $skillParent)) { New-Item -ItemType Directory -Path $skillParent -Force | Out-Null }
 $tmp = Join-Path $env:TEMP ("tedclaude-" + [guid]::NewGuid().ToString("N"))
@@ -258,7 +271,7 @@ npx -y mcp-remote "$MCP_URL" --header "Authorization: Bearer `$t"
 }
 
 # ---------- 6. smoke test ----------
-Say "Running smoke test against $MCP_URL …"
+Say "Running smoke test against $MCP_URL ..."
 try {
     $TOKEN = & "$DOTDIR\get-mcp-token.ps1"
     $initBody = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"installer","version":"1"}}}'
@@ -281,9 +294,9 @@ try {
         } -UseBasicParsing
     $count = ([regex]::Matches($listResp.Content, '"name":"[^"]+"')).Count
     if ($count -gt 0) {
-        OK "MCP reachable — $count tools listed"
+        OK "MCP reachable - $count tools listed"
     } else {
-        Warn "MCP responded but tool count was 0 — check that your user is in the 'tederga-admins' group"
+        Warn "MCP responded but tool count was 0 - check that your user is in the 'tederga-admins' group"
     }
 } catch {
     Warn "Smoke test failed: $_"
@@ -291,31 +304,38 @@ try {
 
 # ---------- 7. ready message ----------
 Write-Host ""
-Write-Host "╔══════════════════════════════════════════════════════════════════╗" -ForegroundColor Green
-Write-Host "║  ✓ Tedplatform is ready in Claude!                              ║" -ForegroundColor Green
-Write-Host "╠══════════════════════════════════════════════════════════════════╣" -ForegroundColor Green
-Write-Host "║                                                                  ║" -ForegroundColor Green
-Write-Host "║  Open Claude (Desktop or Code), then try:                       ║" -ForegroundColor Green
-Write-Host "║                                                                  ║" -ForegroundColor Green
-Write-Host "║   • `"deneme1 adında Go+PG CRM yap, test olarak yayınla`"          ║" -ForegroundColor Green
-Write-Host "║                                                                  ║" -ForegroundColor Green
-Write-Host "║   • `"ahmetbsd.com'u deneme1'in test ortamına bağla`"              ║" -ForegroundColor Green
-Write-Host "║                                                                  ║" -ForegroundColor Green
-Write-Host "║   • `"deneme1'i production'a geç`"                                 ║" -ForegroundColor Green
-Write-Host "║                                                                  ║" -ForegroundColor Green
-Write-Host "║   • `"deneme1 tenant'ını sil`"                                     ║" -ForegroundColor Green
-Write-Host "║                                                                  ║" -ForegroundColor Green
-Write-Host "║  Skill triggers on 'yayınla', 'publish', 'deploy', 'release'.   ║" -ForegroundColor Green
-Write-Host "║                                                                  ║" -ForegroundColor Green
-Write-Host "╚══════════════════════════════════════════════════════════════════╝" -ForegroundColor Green
+Write-Host "+==================================================================+" -ForegroundColor Green
+Write-Host "|  [OK] Tedplatform is ready in Claude!                            |" -ForegroundColor Green
+Write-Host "+==================================================================+" -ForegroundColor Green
+Write-Host "|                                                                  |" -ForegroundColor Green
+Write-Host "|  Open Claude (Desktop or Code), then try:                        |" -ForegroundColor Green
+Write-Host "|                                                                  |" -ForegroundColor Green
+Write-Host "|   - `"deneme1 adinda Go+PG CRM yap, test olarak yayinla`"          |" -ForegroundColor Green
+Write-Host "|                                                                  |" -ForegroundColor Green
+Write-Host "|   - `"ahmetbsd.com'u deneme1'in test ortamina bagla`"              |" -ForegroundColor Green
+Write-Host "|                                                                  |" -ForegroundColor Green
+Write-Host "|   - `"deneme1'i production'a gec`"                                 |" -ForegroundColor Green
+Write-Host "|                                                                  |" -ForegroundColor Green
+Write-Host "|   - `"deneme1 tenant'ini sil`"                                     |" -ForegroundColor Green
+Write-Host "|                                                                  |" -ForegroundColor Green
+Write-Host "|  Skill triggers on 'yayinla', 'publish', 'deploy', 'release'.    |" -ForegroundColor Green
+Write-Host "|                                                                  |" -ForegroundColor Green
+Write-Host "+==================================================================+" -ForegroundColor Green
 Write-Host ""
 
-if ($DESKTOP_CONFIGURED) { Write-Host "  ↻ Restart Claude Desktop to pick up the MCP server." }
-if ($CLI_CONFIGURED)     { Write-Host "  ↻ For Claude Code CLI: just run 'claude' — MCP loads automatically." }
+if ($DESKTOP_CONFIGURED) { Write-Host "  -> Restart Claude Desktop to pick up the MCP server." }
+if ($CLI_CONFIGURED)     { Write-Host "  -> For Claude Code CLI: just run 'claude' - MCP loads automatically." }
+if (-not $DESKTOP_CONFIGURED -and -not $CLI_CONFIGURED) {
+    Write-Host ""
+    Write-Host "  [!] No Claude client detected. Install one of:" -ForegroundColor Yellow
+    Write-Host "        Claude Code CLI : npm install -g @anthropic-ai/claude-code  (needs Node.js)"
+    Write-Host "        Claude Desktop  : https://claude.ai/download"
+    Write-Host "      Then re-run this installer to wire the MCP server in."
+}
 
 Write-Host ""
-Write-Host "  ↻ Re-run this installer any time to refresh the OAuth login."
-Write-Host "  ↻ Files written:"
+Write-Host "  -> Re-run this installer any time to refresh the OAuth login."
+Write-Host "  -> Files written:"
 Write-Host "       $DOTDIR\refresh-token"
 Write-Host "       $DOTDIR\get-mcp-token.ps1"
 Write-Host "       $DOTDIR\claude-mcp-launcher.ps1"
