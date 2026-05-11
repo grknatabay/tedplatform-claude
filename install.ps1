@@ -20,6 +20,22 @@
 
 $ErrorActionPreference = "Stop"
 
+# Top-level trap: any uncaught throw (e.g. from Die) prints the message
+# in red and pauses for input. Without this, an `iwr | iex` run that hits
+# an error would unwind back to the host PowerShell, which on Windows
+# PowerShell 5.1 sometimes auto-closes the window — leaving the user with
+# no diagnostic.
+trap {
+    Write-Host ""
+    Write-Host "✗ $_" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  Re-run the installer after fixing the issue:" -ForegroundColor Yellow
+    Write-Host "    iwr -useb https://raw.githubusercontent.com/grknatabay/tedplatform-claude/main/install.ps1 | iex" -ForegroundColor Yellow
+    Write-Host ""
+    Read-Host "  Press Enter to close this window"
+    continue
+}
+
 # ---------- config ----------
 $KC_URL    = if ($env:KEYCLOAK_URL)        { $env:KEYCLOAK_URL }        else { "https://keycloak.tederga.org" }
 $KC_REALM  = if ($env:KC_REALM)            { $env:KC_REALM }            else { "operators" }
@@ -33,11 +49,50 @@ $SKILL_DIR = Join-Path $env:USERPROFILE ".claude\skills\tedplatform-publish"
 function Say  ($m) { Write-Host $m -ForegroundColor Cyan }
 function OK   ($m) { Write-Host "✓ $m" -ForegroundColor Green }
 function Warn ($m) { Write-Host "! $m" -ForegroundColor Yellow }
-function Die  ($m) { Write-Host "✗ $m" -ForegroundColor Red; exit 1 }
+# Die throws a terminating error rather than calling `exit 1`. When this
+# script is run via `iwr | iex` (the documented install path), `exit` would
+# terminate the HOST PowerShell window; `throw` bubbles up to the top-level
+# try/catch which prints a clear message and pauses for input.
+function Die  ($m) { throw $m }
+
+# Cross-version reader for an Invoke-RestMethod / Invoke-WebRequest error
+# body. PowerShell 7+ exposes the response body via `$_.ErrorDetails.Message`,
+# but Windows PowerShell 5.1 does NOT — the body is only reachable through
+# `$_.Exception.Response.GetResponseStream()`. Without this helper, polling
+# the device-code token endpoint would fail to recognize the expected
+# `authorization_pending` 400 response and crash on PS 5.1.
+function Get-ErrorBody {
+    param($ErrorRecord)
+    if ($ErrorRecord.ErrorDetails -and $ErrorRecord.ErrorDetails.Message) {
+        return $ErrorRecord.ErrorDetails.Message
+    }
+    $resp = $ErrorRecord.Exception.Response
+    if ($resp -and $resp.GetResponseStream) {
+        try {
+            $stream = $resp.GetResponseStream()
+            $stream.Position = 0
+            $reader = New-Object System.IO.StreamReader($stream)
+            return $reader.ReadToEnd()
+        } catch { return $null }
+    }
+    return $null
+}
 
 # ---------- prereqs ----------
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     Die "git is required. Install via 'winget install Git.Git' or https://git-scm.com/download/win"
+}
+# Node.js is needed by the npx-based MCP launcher that both Claude Desktop
+# and Claude Code use to bridge stdio → HTTP MCP transport. Warn now (don't
+# Die) so the device-flow + skill install still happen — user can install
+# Node afterward and re-run the launcher path.
+$NODE_OK = $true
+if (-not (Get-Command npx -ErrorAction SilentlyContinue)) {
+    $NODE_OK = $false
+    Warn "Node.js / npx not found in PATH."
+    Warn "  Install: winget install OpenJS.NodeJS.LTS  (or https://nodejs.org/)"
+    Warn "  Without Node, the MCP launcher Claude uses cannot run."
+    Warn "  The device-flow login + skill install will still proceed."
 }
 
 # ---------- 1. device flow ----------
@@ -95,8 +150,11 @@ while ((Get-Date) -lt $deadline) {
             break
         }
     } catch {
+        # Both PS 5.1 and PS 7+ throw on non-2xx; Get-ErrorBody returns the
+        # JSON body the device-code spec mandates ({"error": "..."}).
+        $body    = Get-ErrorBody $_
         $errBody = $null
-        try { $errBody = ($_.ErrorDetails.Message | ConvertFrom-Json) } catch {}
+        if ($body) { try { $errBody = $body | ConvertFrom-Json } catch {} }
         if ($errBody -and $errBody.error) {
             switch ($errBody.error) {
                 "authorization_pending" { Write-Host -NoNewline "." }
@@ -105,7 +163,11 @@ while ((Get-Date) -lt $deadline) {
                 "access_denied"         { Die "You clicked 'No' in the browser. Re-run if that was a mistake." }
                 default                 { Die "Token error: $($errBody | ConvertTo-Json -Compress)" }
             }
-        } else { Die "Token endpoint error: $_" }
+        } else {
+            # Network blip / DNS / non-JSON 5xx — keep polling rather than dying,
+            # the loop will time out via $deadline if it never recovers.
+            Write-Host -NoNewline "?"
+        }
     }
 }
 Write-Host ""
@@ -207,6 +269,8 @@ try {
             "Accept"        = "application/json, text/event-stream"
         } -UseBasicParsing
     $session = $initResp.Headers["Mcp-Session-Id"]
+    # PS 5.1 returns header values as string[]; PS 7+ returns string. Normalize.
+    if ($session -is [array]) { $session = $session[0] }
     $listBody = '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
     $listResp = Invoke-WebRequest -Method Post -Uri $MCP_URL -Body $listBody `
         -Headers @{
