@@ -448,21 +448,27 @@ OK "Skill installed: $SKILL_DIR"
 # once here lets both configure blocks reference it by path - no inline
 # command strings, no escape pitfalls.
 $launcher = Join-Path $DOTDIR "claude-mcp-launcher.ps1"
+# IMPORTANT: do NOT use stray backticks inside this here-string. PowerShell
+# treats `n inside a double-quoted (or @"..."@) string as a NEWLINE escape.
+# A comment containing `npx` (backtick-quoted) was being silently split:
+# the `n became a newline mid-comment, leaving the second half (px lookup)
+# as a bare command line in the generated launcher. We learned this by
+# painfully debugging "px : The term 'px' is not recognized" in Claude
+# Desktop's MCP server logs. Backticks here are RESERVED for `$ var-escapes.
 $launcherScript = @"
 `$ErrorActionPreference = "Stop"
-# Initialize so the npx wrapper's `$LASTEXITCODE check doesn't throw on a
+# Initialize so the npx wrapper LASTEXITCODE check does not throw on a
 # fresh PS host (Claude Desktop spawns one with empty session state).
 `$global:LASTEXITCODE = 0
 
 # Fetch a fresh access token from the cached refresh token.
 `$t = & "$DOTDIR\get-mcp-token.ps1"
 
-# Resolve npx.cmd EXPLICITLY rather than letting PowerShell's `npx` lookup
-# hit npx.ps1 first (PS prefers .ps1 over .cmd in command resolution).
-# npx.ps1 (Node's shipped wrapper) throws on `$LASTEXITCODE -ne 0` when
-# the variable was never set in the host - which is exactly what happens
-# inside the MSIX-sandboxed PowerShell that Claude Desktop launches.
-# npx.cmd is a plain batch wrapper without that bug.
+# Resolve npx.cmd explicitly. PowerShell prefers .ps1 over .cmd in its
+# command lookup, and Node ships an npx.ps1 wrapper that throws when
+# LASTEXITCODE is unset (exactly what happens inside the MSIX-sandboxed
+# PowerShell that Claude Desktop spawns). npx.cmd is the plain batch
+# wrapper and has no such bug.
 `$npxCmd = (Get-Command 'npx.cmd' -ErrorAction SilentlyContinue).Source
 if (-not `$npxCmd) {
     Write-Error "npx.cmd not found in PATH. Install Node.js LTS (via the installer)."
