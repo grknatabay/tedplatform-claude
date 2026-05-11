@@ -107,6 +107,20 @@ function Refresh-Path {
     if (Test-Path $npmBin) { $env:Path = "$npmBin;$env:Path" }
 }
 
+# Write a string to disk as BOM-less UTF-8. Windows PowerShell 5.1's
+# `Set-Content -Encoding UTF8` writes WITH BOM (the EF BB BF prefix);
+# Claude Desktop's Electron JSON parser rejects that with
+# "Unexpected token '', '{ \"p\"...'". PS 7+ defaults to no-BOM but we
+# can't assume PS 7. Use the .NET API for both.
+function Write-Utf8NoBom {
+    param([string]$Path, [string]$Content)
+    $dir = Split-Path -Parent $Path
+    if ($dir -and -not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    [System.IO.File]::WriteAllText($Path, $Content, (New-Object System.Text.UTF8Encoding $false))
+}
+
 # Run an external command (winget, npm, ...) without letting their stderr
 # output trigger our top-level `$ErrorActionPreference = Stop` + trap. These
 # tools routinely write informational notices to stderr (e.g. `npm notice`,
@@ -413,7 +427,7 @@ if (`$resp.refresh_token -and `$resp.refresh_token -ne `$REFRESH.Trim()) {
 }
 Write-Output `$resp.access_token
 "@
-Set-Content -Path "$DOTDIR\get-mcp-token.ps1" -Value $tokenScript -Encoding UTF8
+Write-Utf8NoBom -Path "$DOTDIR\get-mcp-token.ps1" -Content $tokenScript
 OK "Token refresher: $DOTDIR\get-mcp-token.ps1"
 
 # ---------- 3. install skill ----------
@@ -438,7 +452,7 @@ if ($script:ClaudeDesktopPresent) {
     if (-not (Test-Path $DESKTOP_DIR)) {
         New-Item -ItemType Directory -Path $DESKTOP_DIR -Force | Out-Null
     }
-    if (-not (Test-Path $DESKTOP_CFG)) { Set-Content $DESKTOP_CFG '{}' -Encoding UTF8 }
+    if (-not (Test-Path $DESKTOP_CFG)) { Write-Utf8NoBom -Path $DESKTOP_CFG -Content '{}' }
     $cfg = Get-Content $DESKTOP_CFG -Raw | ConvertFrom-Json
     if (-not $cfg.PSObject.Properties.Name.Contains("mcpServers")) {
         $cfg | Add-Member -MemberType NoteProperty -Name "mcpServers" -Value (New-Object PSObject)
@@ -454,7 +468,7 @@ if ($script:ClaudeDesktopPresent) {
         args    = $launcherArgs
     }
     $cfg.mcpServers | Add-Member -MemberType NoteProperty -Name "tedplatform" -Value $entry -Force
-    $cfg | ConvertTo-Json -Depth 10 | Set-Content $DESKTOP_CFG -Encoding UTF8
+    Write-Utf8NoBom -Path $DESKTOP_CFG -Content ($cfg | ConvertTo-Json -Depth 10)
     OK "Claude Desktop configured: $DESKTOP_CFG"
     $DESKTOP_CONFIGURED = $true
 } else {
@@ -465,11 +479,12 @@ if ($script:ClaudeDesktopPresent) {
 $CLI_CONFIGURED = $false
 if (Get-Command claude -ErrorAction SilentlyContinue) {
     $launcher = Join-Path $DOTDIR "claude-mcp-launcher.ps1"
-    @"
+    $launcherScript = @"
 `$ErrorActionPreference = "Stop"
 `$t = & "$DOTDIR\get-mcp-token.ps1"
 npx -y mcp-remote "$MCP_URL" --header "Authorization: Bearer `$t"
-"@ | Set-Content $launcher -Encoding UTF8
+"@
+    Write-Utf8NoBom -Path $launcher -Content $launcherScript
 
     # `claude mcp remove` writes "No MCP server found ..." to stderr when
     # the entry doesn't exist yet — Invoke-External keeps that off our
