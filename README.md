@@ -27,15 +27,25 @@ iwr -useb https://raw.githubusercontent.com/grknatabay/tedplatform-claude/main/i
 
 The installer is genuinely one-shot. It:
 
-1. **Auto-installs prerequisites** if missing — `git`, `Node.js LTS`, and
-   `@anthropic-ai/claude-code` (npm global). Mac uses Homebrew, Linux
-   uses apt/dnf/pacman, Windows uses winget. If you already have them,
-   they are skipped.
-2. Opens your browser to a Keycloak login page (use your **own** account —
-   `Sign in with GitHub` is supported via Keycloak's IdP federation).
+1. **Auto-installs prerequisites** if missing, **skips them if present**:
+   - `git`
+   - `Node.js LTS` (≥ v18 — checked, upgrades older Node automatically)
+   - `@anthropic-ai/claude-code` (Claude Code CLI, via `npm install -g`)
+   - `Claude Desktop` (Mac via `brew install --cask claude`, Windows via
+     `winget install Anthropic.Claude`; Linux: skipped, no official build)
+
+   Each tool is detected before install (`command -v` / `Get-Command` /
+   known file paths). Existing installations are respected — including
+   custom Node managers (nvm, fnm, volta) and Claude Desktop installed
+   manually from claude.ai/download.
+2. Opens your browser to a Keycloak login page. Sign in with **your own
+   account** — either Keycloak username/password OR "Sign in with GitHub"
+   (federation live).
 3. After you click **Allow**, saves a refresh token to `~/.tedplatform/`.
-4. Configures Claude Desktop and Claude Code CLI (whichever is present —
-   the installer installed Claude Code for you in step 1).
+4. Configures **both** Claude Desktop and Claude Code CLI MCP entries
+   (whichever is present — typically both, since step 1 installed them).
+   The Claude Desktop config dir is force-created so the entry is in
+   place even if you have not opened Claude yet.
 5. Installs the `tedplatform-publish` skill into `~/.claude/skills/`.
 6. Smoke-tests the connection (lists the live MCP tool count, expect 24).
 7. Prints example prompts you can paste into Claude.
@@ -107,30 +117,44 @@ remove the `tedplatform` entry from your Claude Desktop config and run
 
 ## Login modes
 
-**Today** — Keycloak username/password.
-Your platform operator (Ahmet/Gürkan) creates a Keycloak user for you in the
-`tederga-admins` group. You enter those creds in the browser when the installer
-opens it.
+The Keycloak login page the installer opens supports two paths — pick
+whichever your platform team has set up for you:
 
-**Coming next** — GitHub OAuth.
-Once `apply-github-federation.sh` runs against the cluster, the same Keycloak
-login page will show a "Sign in with GitHub" button. Your GitHub identity (in
-the right TedergaGO team) will auto-create a Keycloak user behind the scenes.
-The installer code does not change — Keycloak handles the IdP layer
-transparently.
+- **Sign in with GitHub** (recommended). Your GitHub identity (must be a
+  member of the `TedergaGO/tedplatform-admins` team) federates into a
+  Keycloak account automatically on first login. Nothing for the
+  operator to provision per developer.
+- **Keycloak username/password**. The platform operator creates a
+  Keycloak user for you in the `tederga-admins` group; you enter those
+  creds in the browser. Useful when GitHub federation isn't desired or
+  for service accounts.
+
+Either way, the device-code flow itself is the same — the installer
+script doesn't care which path you took.
 
 ---
 
 ## Re-running
 
-Re-run the installer any time:
+The installer is **idempotent** — re-running it N times does nothing
+already done. Concretely:
 
-- to refresh an expired refresh token (default offline session ~30 days),
-- to pick up a newer skill version (the installer pulls the latest `main`),
-- to switch which Claude clients are configured (Desktop / CLI).
+- Already-installed tools (git / Node / Claude Code / Claude Desktop)
+  are detected and **skipped**, never re-installed or re-downloaded.
+- Existing `tedplatform` MCP entries in your Claude configs are replaced
+  in place; other MCP servers you may have configured are **left untouched**.
+- The skill at `~/.claude/skills/tedplatform-publish/` is replaced with
+  the latest `main` version each run (so re-running is also how you
+  update the skill).
+- Your refresh token in `~/.tedplatform/refresh-token` is overwritten
+  with the new device-flow result; old token is invalidated server-side
+  by Keycloak only when explicitly revoked.
 
-It is idempotent: existing config entries for `tedplatform` are replaced
-in place; other MCP servers in your config are untouched.
+When to re-run:
+- Refresh an expired refresh token (default offline session ~30 days).
+- Pull a newer skill version.
+- Add a Claude client you didn't have before (e.g. you installed Claude
+  Desktop manually, then re-run to wire it).
 
 ---
 

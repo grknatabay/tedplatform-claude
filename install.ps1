@@ -107,6 +107,32 @@ function Refresh-Path {
     if (Test-Path $npmBin) { $env:Path = "$npmBin;$env:Path" }
 }
 
+# Run an external command (winget, npm, ...) without letting their stderr
+# output trigger our top-level `$ErrorActionPreference = Stop` + trap. These
+# tools routinely write informational notices to stderr (e.g. `npm notice`,
+# `winget warning`); we only care about the actual exit code.
+#
+# Returns the exit code; caller checks for non-zero.
+function Invoke-External {
+    param(
+        [Parameter(Mandatory)]$Cmd,
+        [string[]]$Args = @(),
+        [switch]$Quiet  # if set, drop output entirely (still honours exit code)
+    )
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        if ($Quiet) {
+            & $Cmd @Args 2>&1 | Out-Null
+        } else {
+            & $Cmd @Args 2>&1 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }
+        }
+        return $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+}
+
 function Ensure-Git {
     if (Get-Command git -ErrorAction SilentlyContinue) {
         OK "git found: $((git --version) 2>&1) (already installed - skipping)"
@@ -116,7 +142,13 @@ function Ensure-Git {
         Die "git is required and winget isn't available. Install git from https://git-scm.com/download/win"
     }
     Say "git not found - installing via winget..."
-    winget install --silent --accept-source-agreements --accept-package-agreements --id Git.Git --scope user 2>&1 | Out-Null
+    $rc = Invoke-External -Quiet -Cmd "winget" -Args @(
+        "install","--silent","--accept-source-agreements","--accept-package-agreements",
+        "--id","Git.Git","--scope","user"
+    )
+    if ($rc -ne 0) {
+        Die "winget install Git.Git failed (exit $rc). Install manually from https://git-scm.com/download/win"
+    }
     Refresh-Path
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
         Die "git install reported success but 'git' still not in PATH. Open a new PowerShell and re-run."
@@ -138,7 +170,13 @@ function Ensure-Node {
         Die "Node.js v18+ required and winget isn't available. Install Node.js LTS from https://nodejs.org/"
     }
     Say "Installing Node.js LTS via winget (this can take 1-2 minutes)..."
-    winget install --silent --accept-source-agreements --accept-package-agreements --id OpenJS.NodeJS.LTS 2>&1 | Out-Null
+    $rc = Invoke-External -Quiet -Cmd "winget" -Args @(
+        "install","--silent","--accept-source-agreements","--accept-package-agreements",
+        "--id","OpenJS.NodeJS.LTS"
+    )
+    if ($rc -ne 0) {
+        Die "winget install Node.js failed (exit $rc). Install manually from https://nodejs.org/"
+    }
     Refresh-Path
     if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
         Die "Node install reported success but 'node' still not in PATH. Open a new PowerShell and re-run."
@@ -152,7 +190,10 @@ function Ensure-ClaudeCLI {
         return
     }
     Say "Claude Code CLI not found - installing globally via npm..."
-    npm install -g "@anthropic-ai/claude-code" 2>&1 | Select-Object -Last 3 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }
+    $rc = Invoke-External -Cmd "npm" -Args @("install","-g","@anthropic-ai/claude-code")
+    if ($rc -ne 0) {
+        Die "npm install -g @anthropic-ai/claude-code failed (exit $rc). Try running it manually from a new PowerShell to see the full error."
+    }
     Refresh-Path
     if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
         Warn "Claude Code installed but 'claude' is not yet in PATH for this shell."
@@ -188,9 +229,12 @@ function Ensure-ClaudeDesktop {
         return
     }
     Say "Claude Desktop not found - installing via winget..."
-    winget install --silent --accept-source-agreements --accept-package-agreements --id Anthropic.Claude --scope user 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        Warn "winget install Anthropic.Claude failed (package may have been renamed)."
+    $rc = Invoke-External -Quiet -Cmd "winget" -Args @(
+        "install","--silent","--accept-source-agreements","--accept-package-agreements",
+        "--id","Anthropic.Claude","--scope","user"
+    )
+    if ($rc -ne 0) {
+        Warn "winget install Anthropic.Claude failed (exit $rc; package may have been renamed)."
         Warn "  Install manually from https://claude.ai/download"
         return
     }
