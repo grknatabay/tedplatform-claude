@@ -141,7 +141,17 @@ at the end of the installer and add the MCP manually.
 
 ## Source code
 
-- This installer + skill: <https://github.com/grknatabay/tedplatform-claude> (public)
-- MCP server source: <https://github.com/grknatabay/tedplatform-mcp> (private)
-- Platform infra: <https://github.com/grknatabay/tedplatform-infra> (private)
-- Tenant scaffolds: <https://github.com/grknatabay/tedplatform-tenant-template> (private)
+| Repo | Access | Purpose |
+|---|---|---|
+| <https://github.com/grknatabay/tedplatform-claude> | **public** | Installer + Claude skill (this repo). No secrets — safe to fork or audit. |
+| <https://github.com/grknatabay/tedplatform-mcp> | private | MCP server source (Go, mark3labs/mcp-go). Tools the platform exposes to Claude. |
+| <https://github.com/grknatabay/tedplatform-infra> | private | ArgoCD `apps/`, Helm values, Vault/Keycloak/Harbor configs. |
+| <https://github.com/grknatabay/tedplatform-tenant-template> | private | Starter trees (`examples/go-postgres`, `nestjs-postgres`, `nextjs`) used by `tenant_app_create`. |
+| <https://github.com/grknatabay/tedplatform-ci-templates> | private | Reusable GitHub Actions workflow tenant repos call. |
+| <https://github.com/grknatabay/tedplatform-backstage> | private | Operator console (Backstage) source. |
+| <https://github.com/grknatabay/tedplatform-controllers> | private | AppExposure CRD reconciler. |
+
+The private repos return **404** to anyone not invited as a collaborator —
+that is GitHub's design (private repos hide their existence from
+non-members). If you need access, ask your platform team to invite your
+GitHub user; you'll get an email + notification.
