@@ -154,11 +154,12 @@ push.
 **Path B — User has a repo already:**
 
 Tell them to push to `harbor.tederga.org/<tenant>/<app>` via their CI.
-The platform's tenant-template repo includes `_pending_workflows/ci.yml`.
-Repo secrets:
+Reference the reusable workflow at
+`grknatabay/tedplatform-ci-templates/.github/workflows/reusable-build-publish.yml`
+(call it from their own `.github/workflows/ci.yml`). Repo secrets:
 
-- `HARBOR_USER` = robot account name from Vault `secret/tenants/<tenant>/harbor`
-- `HARBOR_TOKEN` = robot secret from the same path
+- `HARBOR_USER` = robot account name (cached in K8s Secret `<tenant>-build/harbor-robot-creds`)
+- `HARBOR_TOKEN` = robot secret from the same Secret
 - (Cosign signing uses OIDC keyless — no extra secret)
 
 ### Step 5 — Wait for the image (only paths A/B)
@@ -285,9 +286,9 @@ reference in their app config.
   to re-auth as an admin or use only tenant-scoped tools.
 - **`namespace not found`** → tenant_onboard hasn't run. Run it.
 - **`refusing to allow a Personal Access Token to create or update
-  workflow`** → platform PAT lacks `workflow` scope. The starter ships
-  workflows at `_pending_workflows/` — tell user to commit them via web
-  UI (no PAT involved) or rotate the PAT with workflow scope.
+  workflow`** → should not happen post cont 11; platform PAT was rotated
+  with `workflow` scope. If it recurs, re-rotate using
+  `~/.secrets/scripts/rotate-github-pat.sh` with a fresh PAT.
 - **CNPG Cluster created but Secret missing** → wait ~30-60s, CNPG is
   async. If still missing after 2 minutes, check operator logs.
 - **`app_expose` OK but URL 503** → either the Service has no Endpoints
