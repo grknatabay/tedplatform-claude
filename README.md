@@ -25,17 +25,32 @@ curl -sSL https://raw.githubusercontent.com/grknatabay/tedplatform-claude/main/i
 iwr -useb https://raw.githubusercontent.com/grknatabay/tedplatform-claude/main/install.ps1 | iex
 ```
 
-The installer:
+The installer is genuinely one-shot. It:
 
-1. Opens your browser to a Keycloak login page (use your **own** account —
-   username/password today, "Sign in with GitHub" once federation is live).
-2. After you click **Allow**, saves a refresh token to `~/.tedplatform/`.
-3. Configures Claude Desktop and Claude Code CLI (whichever you have).
-4. Installs the `tedplatform-publish` skill into `~/.claude/skills/`.
-5. Smoke-tests the connection (lists the live MCP tool count).
-6. Prints example prompts you can paste into Claude.
+1. **Auto-installs prerequisites** if missing — `git`, `Node.js LTS`, and
+   `@anthropic-ai/claude-code` (npm global). Mac uses Homebrew, Linux
+   uses apt/dnf/pacman, Windows uses winget. If you already have them,
+   they are skipped.
+2. Opens your browser to a Keycloak login page (use your **own** account —
+   `Sign in with GitHub` is supported via Keycloak's IdP federation).
+3. After you click **Allow**, saves a refresh token to `~/.tedplatform/`.
+4. Configures Claude Desktop and Claude Code CLI (whichever is present —
+   the installer installed Claude Code for you in step 1).
+5. Installs the `tedplatform-publish` skill into `~/.claude/skills/`.
+6. Smoke-tests the connection (lists the live MCP tool count, expect 24).
+7. Prints example prompts you can paste into Claude.
 
-No platform secrets are baked into the installer. Your refresh token is yours.
+No platform secrets are baked into the installer. Your refresh token is
+yours alone.
+
+### Truly required up-front
+
+- macOS: nothing — the installer bootstraps Homebrew-installable bits.
+  (If Homebrew itself is missing, the installer prints the one-line
+  Homebrew install command for you.)
+- Linux: a sudo-capable account so apt/dnf can install `nodejs npm`.
+- Windows: `winget` (ships with Windows 10 1809+ / Server 2022). The
+  installer uses winget user-scope so no admin elevation is needed.
 
 ---
 

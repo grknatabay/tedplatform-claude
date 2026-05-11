@@ -91,22 +91,73 @@ function Get-ErrorBody {
     return $null
 }
 
-# ---------- prereqs ----------
-if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-    Die "git is required. Install via 'winget install Git.Git' or https://git-scm.com/download/win"
+# ---------- prereqs (auto-install where possible) ----------
+# Strategy: same as install.sh - use the OS package manager (winget here)
+# to install Node.js + Claude Code automatically so the install is genuinely
+# one-shot. No "go install X then re-run" cycles.
+
+# Refresh the current process' PATH from machine + user registry. winget /
+# npm install side effects only show up in NEW shells unless we do this.
+function Refresh-Path {
+    $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+    $userPath    = [System.Environment]::GetEnvironmentVariable("Path", "User")
+    $env:Path    = "$machinePath;$userPath"
+    # npm global bin lives under %APPDATA%\npm by default; ensure it.
+    $npmBin = Join-Path $env:APPDATA "npm"
+    if (Test-Path $npmBin) { $env:Path = "$npmBin;$env:Path" }
 }
-# Node.js is needed by the npx-based MCP launcher that both Claude Desktop
-# and Claude Code use to bridge stdio → HTTP MCP transport. Warn now (don't
-# Die) so the device-flow + skill install still happen — user can install
-# Node afterward and re-run the launcher path.
-$NODE_OK = $true
-if (-not (Get-Command npx -ErrorAction SilentlyContinue)) {
-    $NODE_OK = $false
-    Warn "Node.js / npx not found in PATH."
-    Warn "  Install: winget install OpenJS.NodeJS.LTS  (or https://nodejs.org/)"
-    Warn "  Without Node, the MCP launcher Claude uses cannot run."
-    Warn "  The device-flow login + skill install will still proceed."
+
+function Ensure-Git {
+    if (Get-Command git -ErrorAction SilentlyContinue) { return }
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Die "git is required and winget isn't available. Install git from https://git-scm.com/download/win"
+    }
+    Say "git not found - installing via winget..."
+    winget install --silent --accept-source-agreements --accept-package-agreements --id Git.Git --scope user 2>&1 | Out-Null
+    Refresh-Path
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        Die "git install reported success but 'git' still not in PATH. Open a new PowerShell and re-run."
+    }
+    OK "git installed: $((git --version) 2>&1)"
 }
+
+function Ensure-Node {
+    if ((Get-Command node -ErrorAction SilentlyContinue) -and (Get-Command npx -ErrorAction SilentlyContinue)) {
+        OK "Node.js found: $((node -v) 2>&1)"
+        return
+    }
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Die "Node.js + npx required and winget isn't available. Install Node.js LTS from https://nodejs.org/"
+    }
+    Say "Node.js not found - installing via winget (this can take 1-2 minutes)..."
+    winget install --silent --accept-source-agreements --accept-package-agreements --id OpenJS.NodeJS.LTS 2>&1 | Out-Null
+    Refresh-Path
+    if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+        Die "Node install reported success but 'node' still not in PATH. Open a new PowerShell and re-run."
+    }
+    OK "Node.js installed: $((node -v) 2>&1)"
+}
+
+function Ensure-ClaudeCLI {
+    if (Get-Command claude -ErrorAction SilentlyContinue) {
+        OK "Claude Code CLI found: $((claude --version) 2>&1 | Select-Object -First 1)"
+        return
+    }
+    Say "Claude Code CLI not found - installing globally via npm..."
+    npm install -g "@anthropic-ai/claude-code" 2>&1 | Select-Object -Last 3 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }
+    Refresh-Path
+    if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
+        Warn "Claude Code installed but 'claude' is not yet in PATH for this shell."
+        Warn "After this installer finishes, open a new PowerShell to use it."
+    } else {
+        OK "Claude Code installed: $((claude --version) 2>&1 | Select-Object -First 1)"
+    }
+}
+
+Ensure-Git
+Ensure-Node
+Ensure-ClaudeCLI
+
 
 # ---------- 1. device flow ----------
 Say "=== Tedplatform Claude installer ==="

@@ -50,6 +50,83 @@ case "$OS" in
   *)      die "Unsupported OS: $OS (use install.ps1 on Windows)" ;;
 esac
 
+# ---------- 0. auto-install Node.js + Claude Code CLI ----------
+# The MCP launcher (used by both Claude Desktop and Claude Code) is
+# `npx -y mcp-remote ...`, which requires Node.js. And there's no
+# point installing the MCP entry if the user has no Claude client.
+# We install both automatically here so the install is genuinely
+# one-shot — no follow-up "go install X then re-run" cycles.
+
+ensure_node() {
+  if command -v node >/dev/null 2>&1 && command -v npx >/dev/null 2>&1; then
+    ok "Node.js found: $(node -v)"
+    return 0
+  fi
+  say "Node.js not found - installing automatically..."
+  case "$OS" in
+    Darwin)
+      if command -v brew >/dev/null 2>&1; then
+        brew install node >/dev/null || die "brew install node failed"
+      else
+        die "Homebrew not found. Install it first:
+  /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"
+Then re-run this installer."
+      fi
+      # Apple Silicon brew lives in /opt/homebrew; Intel in /usr/local. Make
+      # both visible to the rest of this script run.
+      for d in /opt/homebrew/bin /usr/local/bin; do
+        [ -d "$d" ] && case ":$PATH:" in *":$d:"*) ;; *) PATH="$d:$PATH" ;; esac
+      done
+      export PATH
+      ;;
+    Linux)
+      if command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update -qq && sudo apt-get install -y nodejs npm \
+          || die "apt-get install nodejs failed - try installing manually from https://nodejs.org/"
+      elif command -v dnf >/dev/null 2>&1; then
+        sudo dnf install -y nodejs npm \
+          || die "dnf install nodejs failed - try installing manually from https://nodejs.org/"
+      elif command -v pacman >/dev/null 2>&1; then
+        sudo pacman -S --noconfirm nodejs npm \
+          || die "pacman install nodejs failed - try installing manually from https://nodejs.org/"
+      else
+        die "No supported package manager. Install Node.js manually: https://nodejs.org/"
+      fi
+      ;;
+  esac
+  command -v node >/dev/null 2>&1 \
+    || die "Node install completed but 'node' is not in PATH. Open a new terminal and re-run."
+  ok "Node.js installed: $(node -v)"
+}
+
+ensure_claude_cli() {
+  if command -v claude >/dev/null 2>&1; then
+    ok "Claude Code CLI found: $(claude --version 2>/dev/null | head -1)"
+    return 0
+  fi
+  say "Claude Code CLI not found - installing globally via npm..."
+  if ! npm install -g @anthropic-ai/claude-code >/dev/null 2>&1; then
+    warn "npm global install failed (likely a permissions issue with the npm prefix)."
+    warn "Trying with sudo..."
+    sudo npm install -g @anthropic-ai/claude-code >/dev/null \
+      || die "Could not install claude-code. Try manually: sudo npm install -g @anthropic-ai/claude-code"
+  fi
+  # npm global bin needs to be in PATH for the rest of this run.
+  NPM_BIN="$(npm config get prefix 2>/dev/null)/bin"
+  if [ -n "$NPM_BIN" ] && [ -d "$NPM_BIN" ]; then
+    case ":$PATH:" in *":$NPM_BIN:"*) ;; *) PATH="$NPM_BIN:$PATH"; export PATH ;; esac
+  fi
+  if ! command -v claude >/dev/null 2>&1; then
+    warn "Claude Code installed but 'claude' is not yet in PATH for this shell."
+    warn "After this installer finishes, open a new terminal to use it."
+  else
+    ok "Claude Code installed: $(claude --version 2>/dev/null | head -1)"
+  fi
+}
+
+ensure_node
+ensure_claude_cli
+
 # ---------- 1. device flow ----------
 say "═══ Tedplatform Claude installer ═══"
 say "Starting browser-based login (Keycloak device code)…"
