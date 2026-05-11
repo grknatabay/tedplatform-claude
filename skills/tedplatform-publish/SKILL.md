@@ -104,39 +104,64 @@ db_provision(tenant=acme, env=prod, kind=kafka-topic,
              name=<app>-events, kafka_cluster=kafka/tedplatform-kafka)
 ```
 
-Each call returns an `env_template` map and `secret_ref` — KEEP these.
-You need them in Step 5 when writing the Deployment manifest.
+Each call returns an `env_template` map and `secret_ref`. With Path C
+(below) you pass `deps_json` to `tenant_app_publish` and it auto-wires
+these into the Deployment — you do NOT have to thread them through env
+vars by hand. Skip this step entirely if you've decided Claude will pass
+deps in the same `tenant_app_publish` call.
 
 If `kind=kafka-topic` errors with "no Kafka cluster", tell the user kafka
 isn't provisioned on the platform yet — they should either restructure
 to use Redis pub/sub or wait for the Kafka cluster rollout.
 
-### Step 4 — Get the code into the cluster
+### Step 4 — Publish
 
 Pick ONE path. **Path C is the default when you (Claude) wrote the code
-this session** — it's the fastest path to a running URL.
+this session** — one call goes from source bytes to a working URL.
 
-**Path C — In-cluster Kaniko build (no GitHub):**
+**Path C — In-cluster one-shot publish (no GitHub, no YAML):**
 
 Tar+gzip the user's source directory, base64-encode, and call:
 
 ```
-tenant_app_build(tenant=acme, app_name=crm,
-                 code_archive_b64=<base64>,
-                 dockerfile_path=Dockerfile,
-                 wait=true)
+tenant_app_publish(
+  tenant=acme, app_name=crm, env=test,
+  code_archive_b64=<base64>,
+  port=8080,
+  deps_json='[{"kind":"postgres","name":"crm-db"}]',
+  hosts_json='["test.acme.tederga.org"]',
+  visibility=public,
+  wait=true
+)
 ```
 
-The tool spawns a Kaniko Job in `<tenant>-build` namespace, builds the
-image, pushes it to `harbor.tederga.org/<tenant>/<app>:sha-<ts>`, and
-(when `wait=true`) returns the final status + log tail. Auto-creates the
-Harbor robot account on first call and caches creds in Vault. **Raw
-archive limit ~700 KB** — for larger trees use Path A or B.
+What this does in one call:
+1. Provisions each dep (Postgres/Redis) and waits for its Secret.
+2. Decodes + validates the archive (fail-fast on non-gzip).
+3. Builds with Kaniko, pushes to `harbor.tederga.org/<tenant>/<app>:sha-<ts>`.
+4. Clones the Harbor robot dockerconfig into the env namespace.
+5. Applies Deployment + Service with PodSecurity "restricted"-safe
+   defaults (runAsNonRoot, drop ALL caps, seccomp RuntimeDefault,
+   readOnlyRootFilesystem, /healthz probes). Auto-merges the deps'
+   `env_template` into the Deployment.
+6. Applies the AppExposure → controller creates HTTPProxy + DNS.
+7. Waits for Deployment Ready and (best-effort) HTTPProxy admitted.
+8. Returns the final URL(s).
 
-The returned `image` field is what you'll put in the Deployment you
-write next. Generate a minimal Deployment + Service YAML, `kubectl apply`
-it to `<tenant>-test` (or `<tenant>-prod`) — or let your AppExposure
-controller wire it.
+Re-runs are idempotent — every step keys on stable names. **Raw archive
+limit ~700 KB**; for larger trees use Path A or B.
+
+Defaults you can omit:
+- `env=test`, `port=8080`, `visibility=public`, `health_path=/healthz`,
+  `replicas=1`, `read_only_root_fs=true`, `timeout_seconds=240`
+- `hosts_json` defaults to `["test.<tenant>.tederga.org"]` for test and
+  `["<tenant>.tederga.org"]` for prod
+- `env_vars_json` for extra env (literals or `secretKeyRef:secret/key`)
+- `image=<ref>` instead of `code_archive_b64` if the image is already
+  built (skips the build step)
+
+Read the result: each saga step appears in `result.steps[*]` so a failure
+mid-flow tells you exactly where to fix. URLs are at `result.urls`.
 
 **Path A — Fresh starter repo (user wants source code on GitHub):**
 
@@ -149,7 +174,7 @@ tenant_app_create(tenant=acme, app_name=crm, starter=nestjs-postgres, private=tr
 
 Creates `<tenant>-<app>` repo, populates from starter, substitutes
 `REPLACE_TENANT` → tenant. Tell the user to clone, swap in their code,
-push.
+push. GitHub Actions builds + pushes to Harbor; ArgoCD auto-syncs.
 
 **Path B — User has a repo already:**
 
@@ -162,36 +187,29 @@ Reference the reusable workflow at
 - `HARBOR_TOKEN` = robot secret from the same Secret
 - (Cosign signing uses OIDC keyless — no extra secret)
 
-### Step 5 — Wait for the image (only paths A/B)
+For paths A/B, after the build lands in Harbor, call `tenant_app_publish`
+with `image=registry.tederga.org/<tenant>/<app>:<tag>` instead of
+`code_archive_b64` to wire up Deployment + Service + AppExposure.
 
-For path C, the build is synchronous (you waited inside `tenant_app_build`).
-For paths A/B, the build happens in GitHub Actions. Poll `app_list` until
-the ArgoCD Application shows `sync=Synced & health=Healthy`. If it
-doesn't appear within 2 minutes, ask the user to check their CI run.
+**Lower-level primitives** (only use when `tenant_app_publish` doesn't
+fit, e.g. building once and deploying to many envs):
 
-### Step 6 — Expose to traffic
+- `tenant_app_build` — just the Kaniko build half. Returns the image
+  ref; you then deploy with `tenant_app_publish image=...`.
+- `app_expose` — just the AppExposure half. Use when you already have a
+  Service in place and only need to attach a route.
 
-```
-app_expose(namespace=<tenant>-test, name=<app>, service=<svc-name>,
-           port=8080, visibility=public,
-           hosts=test.<tenant>.tederga.org)
-```
+### Step 5 — Custom domains
 
-For initial publish use `env=test` → host `test.<tenant>.tederga.org`.
-The per-tenant wildcard cert covers it.
-
-**DNS is auto-wired** by `app_expose` for *.tederga.org hosts — you do
-NOT need to call `dns_set` afterwards. The response includes a `dns`
-array showing what changed.
-
-For a custom domain (e.g. `acme.com`) the customer pre-points DNS, then:
+For a customer-owned domain (e.g. `acme.com`) where the customer
+pre-points DNS, follow the publish call with:
 
 ```
 tenant_custom_domain_add(tenant=acme, domain=acme.com,
                          service_name=<app>, env=test, tls_mode=letsencrypt)
 ```
 
-### Step 7 — Promote test → prod (when user says "production'a geç")
+### Step 6 — Promote test → prod (when user says "production'a geç")
 
 ```
 tenant_app_promote(tenant=acme, app_name=crm, from=test, to=prod)
@@ -208,7 +226,7 @@ The prod URL `<tenant>.tederga.org` is the **apex** of the tenant's
 wildcard cert (the wildcard cert SAN now includes the apex — no extra
 cert needed).
 
-### Step 8 — Verify
+### Step 7 — Verify
 
 Call `app_status(name=<app>)` — wait for sync=Synced & health=Healthy.
 Then `curl https://<app>.<tenant>.tederga.org/healthz` to prove the
@@ -227,21 +245,19 @@ reference in their app config.
 2. tenant_list → "deneme1" not present. User named it explicitly → no
    confirmation. Just call tenant_onboard(tenant=deneme1).
 3. Detect from go.mod: github.com/jackc/pgx → postgres needed.
-4. db_provision(tenant=deneme1, env=test, kind=postgres, name=crm-db).
-   → secret_ref { name: 'crm-db-app' }, env_template DATABASE_URL.
-5. tar -czf code.tar.gz . → base64. Inject DATABASE_URL envFrom in your
-   generated Deployment template (the Deployment YAML you'll apply
-   alongside).
-6. tenant_app_build(tenant=deneme1, app_name=api,
-                    code_archive_b64=<...>, wait=true).
-   → image: harbor.tederga.org/deneme1/api:sha-1747000000.
-7. kubectl -n deneme1-test apply -f <Deployment + Service>  (with the
-   image and DATABASE_URL envFrom from secret_ref).
-8. app_expose(namespace=deneme1-test, name=api, service=api, port=8080,
-              visibility=public, hosts=test.deneme1.tederga.org).
-   → DNS auto-wired by the tool.
-9. curl -sI https://test.deneme1.tederga.org/  → expect HTTP 200.
+4. tar -czf code.tar.gz . → base64.
+5. tenant_app_publish(
+     tenant=deneme1, app_name=api, env=test,
+     code_archive_b64=<...>, port=8080,
+     deps_json='[{"kind":"postgres","name":"crm-db"}]',
+     hosts_json='["test.deneme1.tederga.org"]',
+     wait=true).
+   → returns status=ready, urls=["https://test.deneme1.tederga.org/"].
+6. curl -sI https://test.deneme1.tederga.org/  → expect HTTP 200.
 ```
+
+That's the full publish. The single `tenant_app_publish` call covers
+build + deploy + expose + DNS + readiness in one go.
 
 ### Example B — "ahmetbsd.com bağla" (custom domain, customer pre-pointed DNS)
 
