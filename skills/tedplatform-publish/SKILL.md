@@ -7,7 +7,7 @@ description: Use this skill when the user wants to deploy an application to the 
 
 You are deploying an application to **Tedplatform**, a managed Kubernetes
 platform. The platform exposes ~20 MCP tools via the `tedplatform` MCP
-server (typically `https://mcp.teleport.tederga.org/mcp` or local
+server (typically `https://mcp.tederga.org/mcp` or local
 port-forward). Use them; don't reach for raw `kubectl`, `helm`, or
 `docker` unless explicitly asked.
 
@@ -46,7 +46,7 @@ orchestration guide). Then call `tools/list` to see the live tool roster
 
 If `tools/list` doesn't include the tools below, the user isn't connected
 to a Tedplatform MCP server — tell them to add it to their Claude Desktop
-config first (see https://mcp.teleport.tederga.org/docs/CLAUDE_DESKTOP.md
+config first (see https://github.com/grknatabay/tedplatform-claude/blob/main/CLAUDE_DESKTOP.md
 or equivalent).
 
 ### Step 1 — Detect dependencies from the user's code
