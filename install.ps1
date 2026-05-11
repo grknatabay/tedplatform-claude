@@ -476,15 +476,20 @@ npx -y mcp-remote "$MCP_URL" --header "Authorization: Bearer `$t"
     # error path and we just ignore the exit code.
     Invoke-External -Quiet -Cmd "claude" -Args @("mcp","remove","tedplatform") | Out-Null
 
-    $rc = Invoke-External -Quiet -Cmd "claude" -Args @(
-        "mcp","add","--scope","user","tedplatform",
-        "powershell","-NoProfile","-File",$launcher
+    # Modern Claude CLI (>= 2.x) requires `--` to separate the MCP add
+    # options from the child command + its args. Without it, claude tries
+    # to interpret `-NoProfile` as one of its own flags and exits 1.
+    # Don't pass -Quiet here so any future claude error surfaces directly.
+    $rc = Invoke-External -Cmd "claude" -Args @(
+        "mcp","add","--scope","user","--transport","stdio","tedplatform",
+        "--","powershell","-NoProfile","-File",$launcher
     )
     if ($rc -eq 0) {
         OK "Claude Code CLI configured (user scope)"
         $CLI_CONFIGURED = $true
     } else {
-        Warn "Claude Code 'mcp add' failed (exit $rc). Add manually with the launcher at $launcher"
+        Warn "Claude Code 'mcp add' failed (exit $rc). Manual add command:"
+        Warn "    claude mcp add --scope user --transport stdio tedplatform -- powershell -NoProfile -File `"$launcher`""
     }
 } else {
     Warn "Claude Code CLI not in PATH. Install from https://claude.com/code if you want CLI support."

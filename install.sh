@@ -328,11 +328,14 @@ TOKEN=\$("$DOTDIR/get-mcp-token.sh")
 exec npx -y mcp-remote "$MCP_URL" --header "Authorization: Bearer \${TOKEN}"
 EOF
   chmod 700 "$CLI_WRAPPER"
-  if claude mcp add --scope user tedplatform "$CLI_WRAPPER" >/dev/null 2>&1; then
+  # Modern Claude CLI requires `--` between MCP options and the child
+  # command + its args. Show the actual error if it fails - no >/dev/null.
+  if claude mcp add --scope user --transport stdio tedplatform -- "$CLI_WRAPPER"; then
     ok "Claude Code CLI configured (user scope)"
     CLI_CONFIGURED=1
   else
-    warn "Claude Code 'mcp add' failed — older CLI? Add manually: claude mcp add tedplatform $CLI_WRAPPER"
+    warn "Claude Code 'mcp add' failed. Manual command:"
+    warn "    claude mcp add --scope user --transport stdio tedplatform -- $CLI_WRAPPER"
     CLI_CONFIGURED=0
   fi
 else
