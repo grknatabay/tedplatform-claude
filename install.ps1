@@ -203,24 +203,62 @@ function Ensure-ClaudeCLI {
     }
 }
 
-function Ensure-ClaudeDesktop {
-    # Heuristic: known install paths. Claude Desktop on Windows installs to
-    # %LOCALAPPDATA%\AnthropicClaude\ or under Program Files. We don't
-    # strictly need the binary location - we just need the config dir,
-    # which Claude creates on first launch. We force-create it later (in
-    # the configure step) so our MCP entry is ready before the user even
-    # opens Claude.
-    $cfgDir = Join-Path $env:APPDATA "Claude"
-    $alreadyInstalled = $false
-    foreach ($p in @(
+# Module-level state so the configure step downstream knows whether it
+# should force-create the config dir (the binary is installed but the user
+# never opened Claude → no config dir yet) vs genuinely skip (no binary).
+$script:ClaudeDesktopPresent = $false
+
+function Test-ClaudeDesktopInstalled {
+    # 1. Config dir exists → user has opened it at least once.
+    if (Test-Path (Join-Path $env:APPDATA "Claude")) { return $true }
+
+    # 2. Registry uninstall keys - the most reliable way regardless of
+    #    where the installer (Squirrel / MSI / winget) put the binary.
+    $regPaths = @(
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+    $found = Get-ItemProperty -Path $regPaths -ErrorAction SilentlyContinue |
+        Where-Object {
+            ($_.DisplayName -like "*Claude*") -and
+            ($_.Publisher   -like "*Anthropic*" -or $_.DisplayName -like "*Anthropic*")
+        } | Select-Object -First 1
+    if ($found) { return $true }
+
+    # 3. Known binary paths - covers Squirrel installer (per-user) AND
+    #    MSI per-machine layouts including newer paths Anthropic ships.
+    $candidates = @(
         (Join-Path $env:LOCALAPPDATA "AnthropicClaude\Claude.exe"),
+        (Join-Path $env:LOCALAPPDATA "Anthropic\Claude\Claude.exe"),
         (Join-Path $env:LOCALAPPDATA "Programs\Claude\Claude.exe"),
-        "C:\Program Files\Claude\Claude.exe"
-    )) {
-        if (Test-Path $p) { $alreadyInstalled = $true; break }
+        (Join-Path $env:LOCALAPPDATA "Programs\Anthropic Claude\Claude.exe"),
+        "C:\Program Files\Claude\Claude.exe",
+        "C:\Program Files\Anthropic Claude\Claude.exe",
+        "C:\Program Files\AnthropicClaude\Claude.exe"
+    )
+    foreach ($p in $candidates) { if (Test-Path $p) { return $true } }
+
+    # 4. Squirrel pattern: %LOCALAPPDATA%\AnthropicClaude\app-X.Y.Z\Claude.exe
+    $squirrelRoots = @(
+        (Join-Path $env:LOCALAPPDATA "AnthropicClaude"),
+        (Join-Path $env:LOCALAPPDATA "Anthropic")
+    )
+    foreach ($root in $squirrelRoots) {
+        if (Test-Path $root) {
+            $exe = Get-ChildItem -Path $root -Filter "Claude.exe" -Recurse -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+            if ($exe) { return $true }
+        }
     }
-    if ($alreadyInstalled -or (Test-Path $cfgDir)) {
+
+    return $false
+}
+
+function Ensure-ClaudeDesktop {
+    if (Test-ClaudeDesktopInstalled) {
         OK "Claude Desktop found (already installed - skipping)"
+        $script:ClaudeDesktopPresent = $true
         return
     }
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
@@ -229,16 +267,24 @@ function Ensure-ClaudeDesktop {
         return
     }
     Say "Claude Desktop not found - installing via winget..."
-    $rc = Invoke-External -Quiet -Cmd "winget" -Args @(
-        "install","--silent","--accept-source-agreements","--accept-package-agreements",
-        "--id","Anthropic.Claude","--scope","user"
-    )
-    if ($rc -ne 0) {
-        Warn "winget install Anthropic.Claude failed (exit $rc; package may have been renamed)."
-        Warn "  Install manually from https://claude.ai/download"
-        return
+    # Try a few known IDs in order; Anthropic has shipped multiple package
+    # IDs over time. First non-zero exit just means "this ID doesn't exist
+    # in the user's winget sources" — fall through to the next.
+    $tried = @()
+    foreach ($pkgId in @("Anthropic.Claude", "Anthropic.ClaudeDesktop", "AnthropicClaude.Claude")) {
+        $tried += $pkgId
+        $rc = Invoke-External -Quiet -Cmd "winget" -Args @(
+            "install","--silent","--accept-source-agreements","--accept-package-agreements",
+            "--id",$pkgId,"--scope","user"
+        )
+        if ($rc -eq 0) {
+            OK "Claude Desktop installed (winget id: $pkgId)"
+            $script:ClaudeDesktopPresent = $true
+            return
+        }
     }
-    OK "Claude Desktop installed"
+    Warn "winget could not find Claude Desktop under any known package id (tried: $($tried -join ', '))."
+    Warn "  Install manually from https://claude.ai/download"
 }
 
 Ensure-Git
@@ -360,16 +406,22 @@ Remove-Item -Recurse -Force $tmp
 OK "Skill installed: $SKILL_DIR"
 
 # ---------- 4. configure Claude Desktop ----------
+# Trust the registry/binary detection from Ensure-ClaudeDesktop. If the
+# user has Claude Desktop installed but never opened it, the config dir
+# doesn't exist yet — we create it ourselves so the MCP entry is in
+# place at first launch.
 $DESKTOP_DIR = Join-Path $env:APPDATA "Claude"
 $DESKTOP_CFG = Join-Path $DESKTOP_DIR "claude_desktop_config.json"
 $DESKTOP_CONFIGURED = $false
-if (Test-Path $DESKTOP_DIR) {
-    if (-not (Test-Path $DESKTOP_CFG)) { Set-Content $DESKTOP_CFG '{}' }
+if ($script:ClaudeDesktopPresent) {
+    if (-not (Test-Path $DESKTOP_DIR)) {
+        New-Item -ItemType Directory -Path $DESKTOP_DIR -Force | Out-Null
+    }
+    if (-not (Test-Path $DESKTOP_CFG)) { Set-Content $DESKTOP_CFG '{}' -Encoding UTF8 }
     $cfg = Get-Content $DESKTOP_CFG -Raw | ConvertFrom-Json
     if (-not $cfg.PSObject.Properties.Name.Contains("mcpServers")) {
         $cfg | Add-Member -MemberType NoteProperty -Name "mcpServers" -Value (New-Object PSObject)
     }
-    # Wrapper: pwsh fetches a fresh token then exec npx mcp-remote with it.
     $launcherCmd = "powershell"
     $launcherArgs = @(
       "-NoProfile",
@@ -381,11 +433,11 @@ if (Test-Path $DESKTOP_DIR) {
         args    = $launcherArgs
     }
     $cfg.mcpServers | Add-Member -MemberType NoteProperty -Name "tedplatform" -Value $entry -Force
-    $cfg | ConvertTo-Json -Depth 10 | Set-Content $DESKTOP_CFG
+    $cfg | ConvertTo-Json -Depth 10 | Set-Content $DESKTOP_CFG -Encoding UTF8
     OK "Claude Desktop configured: $DESKTOP_CFG"
     $DESKTOP_CONFIGURED = $true
 } else {
-    Warn "Claude Desktop not detected (no $DESKTOP_DIR). Skipping."
+    Warn "Claude Desktop not present - skipping Desktop config."
 }
 
 # ---------- 5. configure Claude Code CLI ----------
@@ -396,14 +448,22 @@ if (Get-Command claude -ErrorAction SilentlyContinue) {
 `$ErrorActionPreference = "Stop"
 `$t = & "$DOTDIR\get-mcp-token.ps1"
 npx -y mcp-remote "$MCP_URL" --header "Authorization: Bearer `$t"
-"@ | Set-Content $launcher
-    & claude mcp remove tedplatform 2>$null | Out-Null
-    & claude mcp add --scope user tedplatform "powershell" "-NoProfile" "-File" $launcher 2>$null | Out-Null
-    if ($LASTEXITCODE -eq 0) {
+"@ | Set-Content $launcher -Encoding UTF8
+
+    # `claude mcp remove` writes "No MCP server found ..." to stderr when
+    # the entry doesn't exist yet — Invoke-External keeps that off our
+    # error path and we just ignore the exit code.
+    Invoke-External -Quiet -Cmd "claude" -Args @("mcp","remove","tedplatform") | Out-Null
+
+    $rc = Invoke-External -Quiet -Cmd "claude" -Args @(
+        "mcp","add","--scope","user","tedplatform",
+        "powershell","-NoProfile","-File",$launcher
+    )
+    if ($rc -eq 0) {
         OK "Claude Code CLI configured (user scope)"
         $CLI_CONFIGURED = $true
     } else {
-        Warn "Claude Code 'mcp add' failed — older CLI? Add manually with the launcher at $launcher"
+        Warn "Claude Code 'mcp add' failed (exit $rc). Add manually with the launcher at $launcher"
     }
 } else {
     Warn "Claude Code CLI not in PATH. Install from https://claude.com/code if you want CLI support."
