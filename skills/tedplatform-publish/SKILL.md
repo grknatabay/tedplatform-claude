@@ -130,12 +130,39 @@ tenant_app_publish(
   port=8080,
   deps_json='[{"kind":"postgres","name":"crm-db"}]',
   hosts_json='["test.acme.tederga.org"]',
-  visibility=public,
-  wait=true
+  visibility=public
 )
 ```
 
-What this does in one call:
+This returns in **under 5 seconds** with a `job_id`:
+
+```json
+{ "job_id": "pub_abc123…",
+  "status": "running",
+  "hint":   "Poll tenant_app_publish_status …" }
+```
+
+The saga runs server-side and is decoupled from the HTTP request, so a
+client-side transport timeout/disconnect does NOT abort it. Then poll
+the status tool every 5-10 seconds until it terminates:
+
+```
+tenant_app_publish_status(job_id=pub_abc123…)
+```
+
+Terminal states:
+- `status="succeeded"` — read `urls[]`. Curl the first URL (HTTPS, no -k)
+  to sanity-check; report it to the user verbatim.
+- `status="failed"` — read `error`. The `steps[]` list shows exactly
+  which step failed; the surrounding fields hint at the fix.
+
+Still running? `steps[]` shows progress (provision_postgres/crm-db →
+build → pull_secret → deployment → service → appexposure → wait_ready).
+Typical full run for a Go/Node CRM + Postgres dep: 90-150 seconds. If
+the call is still running at 5 min, something is genuinely stuck —
+look at the latest step.
+
+What the saga does (same as v0.14.2, just async now):
 1. Provisions each dep (Postgres/Redis) and waits for its Secret.
 2. Decodes + validates the archive (fail-fast on non-gzip).
 3. Builds with Kaniko, pushes to `harbor.tederga.org/<tenant>/<app>:sha-<ts>`.
@@ -146,10 +173,17 @@ What this does in one call:
    `env_template` into the Deployment.
 6. Applies the AppExposure → controller creates HTTPProxy + DNS.
 7. Waits for Deployment Ready and (best-effort) HTTPProxy admitted.
-8. Returns the final URL(s).
+8. Marks the job succeeded with the final URL(s).
 
-Re-runs are idempotent — every step keys on stable names. **Raw archive
-limit ~700 KB**; for larger trees use Path A or B.
+Re-runs of `tenant_app_publish` with the same args are idempotent —
+every step keys on stable names. **Raw archive limit ~700 KB**; for
+larger trees use Path A or B.
+
+**Important** — if the initial `tenant_app_publish` call ever throws a
+transport-level error (network, timeout, -32001), the saga may still
+be running server-side. Try `tenant_app_publish_status` with the
+last-known `job_id` first; if you don't have one, just re-run the
+publish call — it's idempotent.
 
 Defaults you can omit:
 - `env=test`, `port=8080`, `visibility=public`, `health_path=/healthz`,
@@ -159,9 +193,6 @@ Defaults you can omit:
 - `env_vars_json` for extra env (literals or `secretKeyRef:secret/key`)
 - `image=<ref>` instead of `code_archive_b64` if the image is already
   built (skips the build step)
-
-Read the result: each saga step appears in `result.steps[*]` so a failure
-mid-flow tells you exactly where to fix. URLs are at `result.urls`.
 
 **Path A — Fresh starter repo (user wants source code on GitHub):**
 
@@ -250,10 +281,12 @@ reference in their app config.
      tenant=deneme1, app_name=api, env=test,
      code_archive_b64=<...>, port=8080,
      deps_json='[{"kind":"postgres","name":"crm-db"}]',
-     hosts_json='["test.deneme1.tederga.org"]',
-     wait=true).
-   → returns status=ready, urls=["https://test.deneme1.tederga.org/"].
-6. curl -sI https://test.deneme1.tederga.org/  → expect HTTP 200.
+     hosts_json='["test.deneme1.tederga.org"]').
+   → returns job_id="pub_abc…", status="running" (in <5s).
+6. Poll tenant_app_publish_status(job_id=pub_abc…) every 5-10s.
+   After ~90-150s → status="succeeded",
+   urls=["https://test.deneme1.tederga.org/"].
+7. curl -sI https://test.deneme1.tederga.org/  → expect HTTP 200.
 ```
 
 That's the full publish. The single `tenant_app_publish` call covers
