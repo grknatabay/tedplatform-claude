@@ -619,7 +619,11 @@ if (Get-Command claude -ErrorAction SilentlyContinue) {
 # ---------- 6. smoke test ----------
 Say "Running smoke test against $MCP_URL ..."
 try {
-    $TOKEN = & "$DOTDIR\get-mcp-token.ps1"
+    # Token comes from the same Node fetcher the runtime launcher uses.
+    # We're in PS at install time, so just call `node` directly (PATH was
+    # refreshed earlier). Trim any trailing newline node may emit.
+    $TOKEN = (& node "$DOTDIR\token-fetcher.js").Trim()
+    if (-not $TOKEN) { throw "token-fetcher.js returned empty" }
     $initBody = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"installer","version":"1"}}}'
     $initResp = Invoke-WebRequest -Method Post -Uri $MCP_URL -Body $initBody `
         -Headers @{
