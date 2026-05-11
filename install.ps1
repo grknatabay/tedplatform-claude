@@ -203,17 +203,37 @@ function Ensure-ClaudeCLI {
     }
 }
 
-# Module-level state so the configure step downstream knows whether it
-# should force-create the config dir (the binary is installed but the user
-# never opened Claude → no config dir yet) vs genuinely skip (no binary).
+# Module-level state for downstream configure step:
+#   $script:ClaudeDesktopPresent  - any flavor of Claude Desktop is installed
+#   $script:ClaudeDesktopCfgDir   - the actual config dir to write into.
+#                                   MSIX/AppX redirects %APPDATA%\Claude to
+#                                   %LOCALAPPDATA%\Packages\<PFN>\LocalCache\
+#                                   Roaming\Claude — Win32 installs use the
+#                                   plain %APPDATA%\Claude.
 $script:ClaudeDesktopPresent = $false
+$script:ClaudeDesktopCfgDir  = $null
 
 function Test-ClaudeDesktopInstalled {
-    # 1. Config dir exists → user has opened it at least once.
-    if (Test-Path (Join-Path $env:APPDATA "Claude")) { return $true }
+    # 1. Microsoft Store / MSIX install (the new "Claude" unified app).
+    #    Get-AppxPackage is the authoritative source for AppX packages -
+    #    they don't show up in the classic uninstall registry. The MSIX
+    #    redirects classic %APPDATA%\Claude to a per-package LocalCache.
+    $appx = Get-AppxPackage -Name "Claude*" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Publisher -like "*Anthropic*" -or $_.PackageFamilyName -like "Claude_*" } |
+        Select-Object -First 1
+    if ($appx) {
+        $script:ClaudeDesktopCfgDir = Join-Path $env:LOCALAPPDATA "Packages\$($appx.PackageFamilyName)\LocalCache\Roaming\Claude"
+        return $true
+    }
 
-    # 2. Registry uninstall keys - the most reliable way regardless of
-    #    where the installer (Squirrel / MSI / winget) put the binary.
+    # 2. Classic Win32 install - config dir is the plain %APPDATA%\Claude.
+    $win32Cfg = Join-Path $env:APPDATA "Claude"
+    if (Test-Path $win32Cfg) {
+        $script:ClaudeDesktopCfgDir = $win32Cfg
+        return $true
+    }
+
+    # 3. Windows uninstall registry keys (Squirrel, MSI, winget Win32).
     $regPaths = @(
         "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
         "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
@@ -224,10 +244,12 @@ function Test-ClaudeDesktopInstalled {
             ($_.DisplayName -like "*Claude*") -and
             ($_.Publisher   -like "*Anthropic*" -or $_.DisplayName -like "*Anthropic*")
         } | Select-Object -First 1
-    if ($found) { return $true }
+    if ($found) {
+        $script:ClaudeDesktopCfgDir = $win32Cfg
+        return $true
+    }
 
-    # 3. Known binary paths - covers Squirrel installer (per-user) AND
-    #    MSI per-machine layouts including newer paths Anthropic ships.
+    # 4. Known direct binary paths.
     $candidates = @(
         (Join-Path $env:LOCALAPPDATA "AnthropicClaude\Claude.exe"),
         (Join-Path $env:LOCALAPPDATA "Anthropic\Claude\Claude.exe"),
@@ -237,18 +259,17 @@ function Test-ClaudeDesktopInstalled {
         "C:\Program Files\Anthropic Claude\Claude.exe",
         "C:\Program Files\AnthropicClaude\Claude.exe"
     )
-    foreach ($p in $candidates) { if (Test-Path $p) { return $true } }
+    foreach ($p in $candidates) {
+        if (Test-Path $p) { $script:ClaudeDesktopCfgDir = $win32Cfg; return $true }
+    }
 
-    # 4. Squirrel pattern: %LOCALAPPDATA%\AnthropicClaude\app-X.Y.Z\Claude.exe
-    $squirrelRoots = @(
-        (Join-Path $env:LOCALAPPDATA "AnthropicClaude"),
-        (Join-Path $env:LOCALAPPDATA "Anthropic")
-    )
-    foreach ($root in $squirrelRoots) {
+    # 5. Squirrel pattern: %LOCALAPPDATA%\AnthropicClaude\app-X.Y.Z\Claude.exe
+    foreach ($root in @((Join-Path $env:LOCALAPPDATA "AnthropicClaude"),
+                         (Join-Path $env:LOCALAPPDATA "Anthropic"))) {
         if (Test-Path $root) {
             $exe = Get-ChildItem -Path $root -Filter "Claude.exe" -Recurse -ErrorAction SilentlyContinue |
                 Select-Object -First 1
-            if ($exe) { return $true }
+            if ($exe) { $script:ClaudeDesktopCfgDir = $win32Cfg; return $true }
         }
     }
 
@@ -257,34 +278,35 @@ function Test-ClaudeDesktopInstalled {
 
 function Ensure-ClaudeDesktop {
     if (Test-ClaudeDesktopInstalled) {
-        OK "Claude Desktop found (already installed - skipping)"
+        $kind = if ($script:ClaudeDesktopCfgDir -like "*\Packages\*") { "Microsoft Store / MSIX" } else { "Win32" }
+        OK "Claude Desktop found ($kind - already installed, skipping)"
         $script:ClaudeDesktopPresent = $true
         return
     }
-    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        Warn "Claude Desktop not installed and winget unavailable - skipping."
-        Warn "  Install manually from https://claude.ai/download"
-        return
-    }
-    Say "Claude Desktop not found - installing via winget..."
-    # Try a few known IDs in order; Anthropic has shipped multiple package
-    # IDs over time. First non-zero exit just means "this ID doesn't exist
-    # in the user's winget sources" — fall through to the next.
-    $tried = @()
-    foreach ($pkgId in @("Anthropic.Claude", "Anthropic.ClaudeDesktop", "AnthropicClaude.Claude")) {
-        $tried += $pkgId
-        $rc = Invoke-External -Quiet -Cmd "winget" -Args @(
-            "install","--silent","--accept-source-agreements","--accept-package-agreements",
-            "--id",$pkgId,"--scope","user"
+    Say "Claude Desktop not found - attempting install..."
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        # Try Microsoft Store source first (the new unified Claude app
+        # ships there), then classic winget source.
+        $attempts = @(
+            @{ Args = @("install","--silent","--accept-source-agreements","--accept-package-agreements","--source","msstore","--id","9NLG58FMZD0L"); Label = "Microsoft Store (msstore: 9NLG58FMZD0L)" },
+            @{ Args = @("install","--silent","--accept-source-agreements","--accept-package-agreements","--id","Anthropic.Claude","--scope","user");   Label = "winget Anthropic.Claude" },
+            @{ Args = @("install","--silent","--accept-source-agreements","--accept-package-agreements","--id","Anthropic.ClaudeDesktop","--scope","user"); Label = "winget Anthropic.ClaudeDesktop" }
         )
-        if ($rc -eq 0) {
-            OK "Claude Desktop installed (winget id: $pkgId)"
-            $script:ClaudeDesktopPresent = $true
-            return
+        foreach ($a in $attempts) {
+            $rc = Invoke-External -Quiet -Cmd "winget" -Args $a.Args
+            if ($rc -eq 0) {
+                OK "Claude Desktop installed via $($a.Label)"
+                # Re-detect to populate $script:ClaudeDesktopCfgDir.
+                if (Test-ClaudeDesktopInstalled) { $script:ClaudeDesktopPresent = $true }
+                return
+            }
         }
+        Warn "winget could not install Claude Desktop under any known id."
+    } else {
+        Warn "winget unavailable - cannot auto-install Claude Desktop."
     }
-    Warn "winget could not find Claude Desktop under any known package id (tried: $($tried -join ', '))."
-    Warn "  Install manually from https://claude.ai/download"
+    Warn "  Install manually from https://claude.ai/download (Microsoft Store)"
+    Warn "  After installing, re-run this script to wire the MCP entry."
 }
 
 Ensure-Git
@@ -406,11 +428,10 @@ Remove-Item -Recurse -Force $tmp
 OK "Skill installed: $SKILL_DIR"
 
 # ---------- 4. configure Claude Desktop ----------
-# Trust the registry/binary detection from Ensure-ClaudeDesktop. If the
-# user has Claude Desktop installed but never opened it, the config dir
-# doesn't exist yet — we create it ourselves so the MCP entry is in
-# place at first launch.
-$DESKTOP_DIR = Join-Path $env:APPDATA "Claude"
+# Detection (above) tells us whether ANY Claude Desktop flavor is installed
+# AND which config dir it actually uses (MSIX vs Win32). We can't know in
+# advance which package the user picked, so we read the state and follow.
+$DESKTOP_DIR = if ($script:ClaudeDesktopCfgDir) { $script:ClaudeDesktopCfgDir } else { Join-Path $env:APPDATA "Claude" }
 $DESKTOP_CFG = Join-Path $DESKTOP_DIR "claude_desktop_config.json"
 $DESKTOP_CONFIGURED = $false
 if ($script:ClaudeDesktopPresent) {
