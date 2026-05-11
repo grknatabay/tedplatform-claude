@@ -517,21 +517,25 @@ if (-not $npxCmdSource) {
 }
 
 $launcher = Join-Path $DOTDIR "launcher.cmd"
-# NOTE: this is a here-string written as a Windows .cmd batch. Use single-
-# quoted @' '@ where possible to avoid PS interpreting $ or `. We need PS
-# expansion for $DOTDIR, $MCP_URL, $npxCmdSource, so use double-quoted @"
-# but escape every $ that should reach the batch literally.
-$launcherCmd = @"
+# Use SINGLE-QUOTED here-string + .Replace() so PowerShell does not
+# touch backticks. Batch's `for /f "usebackq"` syntax requires literal
+# backticks around the inner command, and double-quoted PS here-strings
+# treat `n as a newline escape — which silently splits the batch line
+# and leaves "ode ..." as a bare command (the user actually saw "The
+# system cannot find the file ode."). Same trap I hit twice before in
+# the launcher.ps1 comments. Single-quoted is the cure.
+$launcherCmd = @'
 @echo off
 setlocal enabledelayedexpansion
-for /f "usebackq delims=" %%i in (`node "$DOTDIR\token-fetcher.js"`) do set "TOKEN=%%i"
+for /f "usebackq delims=" %%i in (`node "__DOTDIR__\token-fetcher.js"`) do set "TOKEN=%%i"
 if "!TOKEN!"=="" (
     echo Failed to fetch access token from Keycloak 1>&2
     exit /b 1
 )
-"$npxCmdSource" -y mcp-remote "$MCP_URL" --header "Authorization: Bearer !TOKEN!"
+"__NPXCMD__" -y mcp-remote "__MCP_URL__" --header "Authorization: Bearer !TOKEN!"
 exit /b !ERRORLEVEL!
-"@
+'@
+$launcherCmd = $launcherCmd.Replace('__DOTDIR__', $DOTDIR).Replace('__NPXCMD__', $npxCmdSource).Replace('__MCP_URL__', $MCP_URL)
 Write-Utf8NoBom -Path $launcher -Content $launcherCmd
 OK "MCP launcher: $launcher"
 
