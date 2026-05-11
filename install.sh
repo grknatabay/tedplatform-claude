@@ -25,7 +25,7 @@ set -euo pipefail
 KC_URL="${KEYCLOAK_URL:-https://keycloak.tederga.org}"
 KC_REALM="${KC_REALM:-operators}"
 KC_CLIENT="${KC_CLIENT:-tedplatform-cli}"
-MCP_URL="${TEDPLATFORM_MCP_URL:-https://mcp.teleport.tederga.org/mcp}"
+MCP_URL="${TEDPLATFORM_MCP_URL:-https://mcp.tederga.org/mcp}"
 INSTALL_REPO_RAW="https://raw.githubusercontent.com/grknatabay/tedplatform-claude/main"
 INSTALL_REPO_GIT="https://github.com/grknatabay/tedplatform-claude"
 

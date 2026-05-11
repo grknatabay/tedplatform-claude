@@ -24,7 +24,7 @@ $ErrorActionPreference = "Stop"
 $KC_URL    = if ($env:KEYCLOAK_URL)        { $env:KEYCLOAK_URL }        else { "https://keycloak.tederga.org" }
 $KC_REALM  = if ($env:KC_REALM)            { $env:KC_REALM }            else { "operators" }
 $KC_CLIENT = if ($env:KC_CLIENT)           { $env:KC_CLIENT }           else { "tedplatform-cli" }
-$MCP_URL   = if ($env:TEDPLATFORM_MCP_URL) { $env:TEDPLATFORM_MCP_URL } else { "https://mcp.teleport.tederga.org/mcp" }
+$MCP_URL   = if ($env:TEDPLATFORM_MCP_URL) { $env:TEDPLATFORM_MCP_URL } else { "https://mcp.tederga.org/mcp" }
 $REPO_GIT  = "https://github.com/grknatabay/tedplatform-claude"
 
 $DOTDIR    = Join-Path $env:USERPROFILE ".tedplatform"
