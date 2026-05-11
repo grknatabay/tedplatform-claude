@@ -450,8 +450,25 @@ OK "Skill installed: $SKILL_DIR"
 $launcher = Join-Path $DOTDIR "claude-mcp-launcher.ps1"
 $launcherScript = @"
 `$ErrorActionPreference = "Stop"
+# Initialize so the npx wrapper's `$LASTEXITCODE check doesn't throw on a
+# fresh PS host (Claude Desktop spawns one with empty session state).
+`$global:LASTEXITCODE = 0
+
+# Fetch a fresh access token from the cached refresh token.
 `$t = & "$DOTDIR\get-mcp-token.ps1"
-npx -y mcp-remote "$MCP_URL" --header "Authorization: Bearer `$t"
+
+# Resolve npx.cmd EXPLICITLY rather than letting PowerShell's `npx` lookup
+# hit npx.ps1 first (PS prefers .ps1 over .cmd in command resolution).
+# npx.ps1 (Node's shipped wrapper) throws on `$LASTEXITCODE -ne 0` when
+# the variable was never set in the host - which is exactly what happens
+# inside the MSIX-sandboxed PowerShell that Claude Desktop launches.
+# npx.cmd is a plain batch wrapper without that bug.
+`$npxCmd = (Get-Command 'npx.cmd' -ErrorAction SilentlyContinue).Source
+if (-not `$npxCmd) {
+    Write-Error "npx.cmd not found in PATH. Install Node.js LTS (via the installer)."
+    exit 1
+}
+& `$npxCmd -y mcp-remote "$MCP_URL" --header "Authorization: Bearer `$t"
 "@
 Write-Utf8NoBom -Path $launcher -Content $launcherScript
 
