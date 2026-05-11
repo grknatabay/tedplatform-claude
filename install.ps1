@@ -441,6 +441,20 @@ Copy-Item -Recurse "$tmp\skills\tedplatform-publish" $SKILL_DIR
 Remove-Item -Recurse -Force $tmp
 OK "Skill installed: $SKILL_DIR"
 
+# ---------- 3.5. write the shared MCP launcher script ----------
+# Both Claude Desktop and Claude Code CLI invoke this same script. It
+# fetches a fresh OAuth access token (refresh-token -> access-token)
+# and execs `npx mcp-remote` with the bearer header. Writing the script
+# once here lets both configure blocks reference it by path - no inline
+# command strings, no escape pitfalls.
+$launcher = Join-Path $DOTDIR "claude-mcp-launcher.ps1"
+$launcherScript = @"
+`$ErrorActionPreference = "Stop"
+`$t = & "$DOTDIR\get-mcp-token.ps1"
+npx -y mcp-remote "$MCP_URL" --header "Authorization: Bearer `$t"
+"@
+Write-Utf8NoBom -Path $launcher -Content $launcherScript
+
 # ---------- 4. configure Claude Desktop ----------
 # Detection (above) tells us whether ANY Claude Desktop flavor is installed
 # AND which config dir it actually uses (MSIX vs Win32). We can't know in
@@ -479,15 +493,15 @@ if ($script:ClaudeDesktopPresent) {
         $cfg | Add-Member -MemberType NoteProperty -Name "mcpServers" -Value (New-Object PSObject)
     }
 
-    $launcherCmd = "powershell"
-    $launcherArgs = @(
-      "-NoProfile",
-      "-Command",
-      "`$t = & '$DOTDIR\get-mcp-token.ps1'; npx -y mcp-remote '$MCP_URL' --header `"Authorization: Bearer $t`""
-    )
+    # Use the SAME launcher.ps1 file that Claude Code CLI uses below.
+    # Inline -Command with embedded $t interpolation was a foot-gun -
+    # PowerShell evaluated $t at install-time (empty), leaving "Bearer "
+    # (no token) in the static config. -File pattern is escape-free and
+    # the launcher script itself fetches a fresh token each invocation.
+    $launcher = Join-Path $DOTDIR "claude-mcp-launcher.ps1"
     $entry = New-Object PSObject -Property @{
-        command = $launcherCmd
-        args    = $launcherArgs
+        command = "powershell"
+        args    = @("-NoProfile", "-File", $launcher)
     }
     $cfg.mcpServers | Add-Member -MemberType NoteProperty -Name "tedplatform" -Value $entry -Force
 
@@ -501,14 +515,6 @@ if ($script:ClaudeDesktopPresent) {
 # ---------- 5. configure Claude Code CLI ----------
 $CLI_CONFIGURED = $false
 if (Get-Command claude -ErrorAction SilentlyContinue) {
-    $launcher = Join-Path $DOTDIR "claude-mcp-launcher.ps1"
-    $launcherScript = @"
-`$ErrorActionPreference = "Stop"
-`$t = & "$DOTDIR\get-mcp-token.ps1"
-npx -y mcp-remote "$MCP_URL" --header "Authorization: Bearer `$t"
-"@
-    Write-Utf8NoBom -Path $launcher -Content $launcherScript
-
     # `claude mcp remove` writes "No MCP server found ..." to stderr when
     # the entry doesn't exist yet — Invoke-External keeps that off our
     # error path and we just ignore the exit code.
