@@ -1,0 +1,281 @@
+#!/usr/bin/env bash
+# Tedplatform — one-shot Claude integration installer (macOS / Linux).
+#
+# Usage:
+#   curl -sSL https://raw.githubusercontent.com/grknatabay/tedplatform-claude/main/install.sh | bash
+#
+# Does:
+#   1. Browser-based OAuth (Keycloak Device Code flow) — you click "Allow" once.
+#   2. Saves a long-lived refresh token to ~/.tedplatform/refresh-token (chmod 600).
+#   3. Writes ~/.tedplatform/get-mcp-token.sh that exchanges the refresh token
+#      for a fresh access token on every Claude session.
+#   4. Adds the Tedplatform MCP server to:
+#        • Claude Desktop  (~/Library/Application Support/Claude/claude_desktop_config.json
+#                           on macOS, ~/.config/Claude/ on Linux)
+#        • Claude Code CLI (via `claude mcp add` if found in PATH)
+#   5. Installs the `tedplatform-publish` skill into ~/.claude/skills/.
+#   6. Prints example prompts you can paste into Claude.
+#
+# Prereqs: bash, curl, jq, python3 (for JSON merge), an existing Keycloak
+# user in the `tederga-admins` group. No GitHub PAT needed.
+
+set -euo pipefail
+
+# ---------- config (override via env) ----------
+KC_URL="${KEYCLOAK_URL:-https://keycloak.tederga.org}"
+KC_REALM="${KC_REALM:-operators}"
+KC_CLIENT="${KC_CLIENT:-tedplatform-cli}"
+MCP_URL="${TEDPLATFORM_MCP_URL:-https://mcp.teleport.tederga.org/mcp}"
+INSTALL_REPO_RAW="https://raw.githubusercontent.com/grknatabay/tedplatform-claude/main"
+INSTALL_REPO_GIT="https://github.com/grknatabay/tedplatform-claude"
+
+DOTDIR="${HOME}/.tedplatform"
+SKILL_DIR="${HOME}/.claude/skills/tedplatform-publish"
+
+# ---------- helpers ----------
+say()  { printf "\033[36m%s\033[0m\n" "$*"; }
+ok()   { printf "\033[32m✓ %s\033[0m\n" "$*"; }
+warn() { printf "\033[33m! %s\033[0m\n" "$*"; }
+die()  { printf "\033[31m✗ %s\033[0m\n" "$*" >&2; exit 1; }
+
+need() { command -v "$1" >/dev/null || die "Required: $1 (install with brew/apt)"; }
+need curl
+need jq
+need python3
+
+OS="$(uname -s)"
+case "$OS" in
+  Darwin) OPENER="open" ;;
+  Linux)  OPENER="xdg-open" ;;
+  *)      die "Unsupported OS: $OS (use install.ps1 on Windows)" ;;
+esac
+
+# ---------- 1. device flow ----------
+say "═══ Tedplatform Claude installer ═══"
+say "Starting browser-based login (Keycloak device code)…"
+
+mkdir -p "$DOTDIR"
+chmod 700 "$DOTDIR"
+
+DEVICE_RESP=$(curl -sSf -X POST \
+  "$KC_URL/realms/$KC_REALM/protocol/openid-connect/auth/device" \
+  -d "client_id=$KC_CLIENT" \
+  -d "scope=openid profile email groups offline_access")
+
+DEVICE_CODE=$(echo "$DEVICE_RESP" | jq -r .device_code)
+USER_CODE=$(echo "$DEVICE_RESP" | jq -r .user_code)
+VERIFY_URL=$(echo "$DEVICE_RESP" | jq -r .verification_uri_complete)
+INTERVAL=$(echo "$DEVICE_RESP" | jq -r .interval)
+EXPIRES_IN=$(echo "$DEVICE_RESP" | jq -r .expires_in)
+
+[ -z "$DEVICE_CODE" ] || [ "$DEVICE_CODE" = "null" ] && die "Device flow failed: $DEVICE_RESP"
+
+cat <<EOF
+
+   ┌────────────────────────────────────────────────────┐
+   │  Open the following URL in your browser:           │
+   │                                                    │
+   │  $VERIFY_URL
+   │                                                    │
+   │  Verification code: $USER_CODE                          │
+   │                                                    │
+   │  Login with your Keycloak account, then click      │
+   │  "Yes" / "Grant Access".                           │
+   └────────────────────────────────────────────────────┘
+
+EOF
+
+# Best-effort browser open (ignore failure — user can copy/paste).
+"$OPENER" "$VERIFY_URL" >/dev/null 2>&1 || warn "Could not auto-open browser. Copy the URL above."
+
+say "Waiting for you to approve in the browser (timeout ${EXPIRES_IN}s)…"
+DEADLINE=$(( $(date +%s) + EXPIRES_IN ))
+while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+  sleep "$INTERVAL"
+  TOK_RESP=$(curl -sS -X POST \
+    "$KC_URL/realms/$KC_REALM/protocol/openid-connect/token" \
+    -d "client_id=$KC_CLIENT" \
+    -d "device_code=$DEVICE_CODE" \
+    -d "grant_type=urn:ietf:params:oauth:grant-type:device_code")
+  ERR=$(echo "$TOK_RESP" | jq -r '.error // empty')
+  case "$ERR" in
+    "")
+      ACCESS=$(echo "$TOK_RESP" | jq -r .access_token)
+      REFRESH=$(echo "$TOK_RESP" | jq -r .refresh_token)
+      [ -n "$ACCESS" ] && [ "$ACCESS" != "null" ] && break
+      ;;
+    "authorization_pending"|"slow_down")
+      printf "."
+      ;;
+    "expired_token")
+      die "Login window expired. Re-run the installer."
+      ;;
+    "access_denied")
+      die "You clicked 'No' / 'Cancel' in the browser. Re-run if that was a mistake."
+      ;;
+    *)
+      die "Token endpoint error: $TOK_RESP"
+      ;;
+  esac
+done
+echo
+[ -z "${ACCESS:-}" ] && die "Timed out waiting for browser approval."
+ok "Logged in (access token: ${#ACCESS} chars, refresh token: ${#REFRESH} chars)"
+
+# ---------- 2. cache refresh token + writer ----------
+echo "$REFRESH" > "$DOTDIR/refresh-token"
+chmod 600 "$DOTDIR/refresh-token"
+
+cat > "$DOTDIR/get-mcp-token.sh" <<EOF
+#!/usr/bin/env bash
+# Auto-generated by tedplatform-claude installer. Do not edit by hand.
+# Exchanges the cached refresh token for a fresh access token (printed to stdout).
+# Re-run the installer if the refresh token expires (default ~30d offline session).
+set -euo pipefail
+REFRESH=\$(cat "${DOTDIR}/refresh-token")
+RESP=\$(curl -sSf -X POST \\
+  "${KC_URL}/realms/${KC_REALM}/protocol/openid-connect/token" \\
+  -d "client_id=${KC_CLIENT}" \\
+  -d "grant_type=refresh_token" \\
+  -d "refresh_token=\${REFRESH}")
+ACC=\$(echo "\$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+# Rotate refresh token if Keycloak issued a new one (default 'use refresh token rotation').
+NEW=\$(echo "\$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('refresh_token',''))")
+if [ -n "\$NEW" ] && [ "\$NEW" != "\$REFRESH" ]; then
+  echo "\$NEW" > "${DOTDIR}/refresh-token"
+  chmod 600 "${DOTDIR}/refresh-token"
+fi
+echo "\$ACC"
+EOF
+chmod 700 "$DOTDIR/get-mcp-token.sh"
+ok "Token refresher: $DOTDIR/get-mcp-token.sh"
+
+# ---------- 3. install skill ----------
+say "Installing tedplatform-publish skill…"
+mkdir -p "$(dirname "$SKILL_DIR")"
+TMP=$(mktemp -d)
+git clone -q --depth 1 "$INSTALL_REPO_GIT" "$TMP/repo"
+rm -rf "$SKILL_DIR"
+cp -r "$TMP/repo/skills/tedplatform-publish" "$SKILL_DIR"
+rm -rf "$TMP"
+ok "Skill installed: $SKILL_DIR"
+
+# ---------- 4. configure Claude Desktop ----------
+case "$OS" in
+  Darwin) DESKTOP_DIR="$HOME/Library/Application Support/Claude" ;;
+  Linux)  DESKTOP_DIR="$HOME/.config/Claude" ;;
+esac
+DESKTOP_CFG="$DESKTOP_DIR/claude_desktop_config.json"
+
+if [ -d "$DESKTOP_DIR" ]; then
+  mkdir -p "$DESKTOP_DIR"
+  [ -f "$DESKTOP_CFG" ] || echo '{}' > "$DESKTOP_CFG"
+  python3 - <<PY
+import json, os
+cfg_path = "$DESKTOP_CFG"
+with open(cfg_path) as f:
+    cfg = json.load(f)
+cfg.setdefault("mcpServers", {})
+cfg["mcpServers"]["tedplatform"] = {
+  "command": "/bin/bash",
+  "args": [
+    "-lc",
+    'TOKEN=$("'$DOTDIR'/get-mcp-token.sh") && exec npx -y mcp-remote "'$MCP_URL'" --header "Authorization: Bearer ${TOKEN}"'
+  ]
+}
+with open(cfg_path, "w") as f:
+    json.dump(cfg, f, indent=2)
+PY
+  ok "Claude Desktop configured: $DESKTOP_CFG"
+  DESKTOP_CONFIGURED=1
+else
+  warn "Claude Desktop not detected (no $DESKTOP_DIR). Skipping Desktop config."
+  DESKTOP_CONFIGURED=0
+fi
+
+# ---------- 5. configure Claude Code (CLI) ----------
+if command -v claude >/dev/null; then
+  claude mcp remove tedplatform >/dev/null 2>&1 || true
+  # Use a wrapper command so the token is fetched fresh each session.
+  CLI_WRAPPER="$DOTDIR/claude-mcp-launcher.sh"
+  cat > "$CLI_WRAPPER" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+TOKEN=\$("$DOTDIR/get-mcp-token.sh")
+exec npx -y mcp-remote "$MCP_URL" --header "Authorization: Bearer \${TOKEN}"
+EOF
+  chmod 700 "$CLI_WRAPPER"
+  if claude mcp add --scope user tedplatform "$CLI_WRAPPER" >/dev/null 2>&1; then
+    ok "Claude Code CLI configured (user scope)"
+    CLI_CONFIGURED=1
+  else
+    warn "Claude Code 'mcp add' failed — older CLI? Add manually: claude mcp add tedplatform $CLI_WRAPPER"
+    CLI_CONFIGURED=0
+  fi
+else
+  warn "Claude Code CLI not found in PATH. Install it from https://claude.com/code if you want CLI support."
+  CLI_CONFIGURED=0
+fi
+
+# ---------- 6. final smoke test ----------
+say "Running smoke test against $MCP_URL …"
+TOKEN=$("$DOTDIR/get-mcp-token.sh")
+SESSION=$(curl -si -X POST "$MCP_URL" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"installer","version":"1"}}}' \
+  | grep -i "Mcp-Session-Id" | tr -d '\r' | awk '{print $2}')
+TOOLS=$(curl -s -X POST "$MCP_URL" \
+  -H "Authorization: Bearer $TOKEN" -H "Mcp-Session-Id: $SESSION" \
+  -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+  | grep -oE '"name":"[^"]*"' | wc -l | tr -d ' ')
+if [ "$TOOLS" -gt 0 ]; then
+  ok "MCP reachable — $TOOLS tools listed"
+else
+  warn "MCP responded but tool count was 0 — check that your user is in the 'tederga-admins' group"
+fi
+
+# ---------- 7. ready message ----------
+cat <<EOF
+
+\033[1;32m
+╔══════════════════════════════════════════════════════════════════╗
+║  ✓ Tedplatform is ready in Claude!                              ║
+╠══════════════════════════════════════════════════════════════════╣
+║                                                                  ║
+║  Open Claude (Desktop or Code), then try:                       ║
+║                                                                  ║
+║   • "deneme1 adında Go+PG CRM yap, test olarak yayınla"          ║
+║                                                                  ║
+║   • "ahmetbsd.com'u deneme1'in test ortamına bağla"              ║
+║                                                                  ║
+║   • "deneme1'i production'a geç"                                 ║
+║                                                                  ║
+║   • "deneme1 tenant'ını sil"                                     ║
+║                                                                  ║
+║  The skill auto-triggers on words like 'yayınla', 'publish',    ║
+║  'deploy', 'release' when combined with tedplatform context.    ║
+║                                                                  ║
+╚══════════════════════════════════════════════════════════════════╝
+\033[0m
+
+EOF
+
+if [ "$DESKTOP_CONFIGURED" = "1" ]; then
+  echo "  ↻ Restart Claude Desktop to pick up the MCP server."
+fi
+if [ "$CLI_CONFIGURED" = "1" ]; then
+  echo "  ↻ For Claude Code CLI: just run 'claude' — MCP is loaded automatically."
+fi
+
+cat <<EOF
+
+  ↻ Re-run this installer any time to refresh the OAuth login.
+  ↻ Files written:
+       $DOTDIR/refresh-token        (chmod 600 — keep secret)
+       $DOTDIR/get-mcp-token.sh
+       $DOTDIR/claude-mcp-launcher.sh
+       $SKILL_DIR/SKILL.md
+EOF
