@@ -452,11 +452,33 @@ if ($script:ClaudeDesktopPresent) {
     if (-not (Test-Path $DESKTOP_DIR)) {
         New-Item -ItemType Directory -Path $DESKTOP_DIR -Force | Out-Null
     }
-    if (-not (Test-Path $DESKTOP_CFG)) { Write-Utf8NoBom -Path $DESKTOP_CFG -Content '{}' }
-    $cfg = Get-Content $DESKTOP_CFG -Raw | ConvertFrom-Json
-    if (-not $cfg.PSObject.Properties.Name.Contains("mcpServers")) {
+
+    # Read existing config defensively. Empty file, BOM-corrupt JSON, or
+    # missing file all collapse to "start with an empty object".
+    $cfg = $null
+    if (Test-Path $DESKTOP_CFG) {
+        try {
+            $raw = [System.IO.File]::ReadAllText($DESKTOP_CFG)
+            # Strip leading UTF-8 BOM if a previous installer left one.
+            if ($raw.Length -ge 1 -and $raw[0] -eq [char]0xFEFF) { $raw = $raw.Substring(1) }
+            if ($raw.Trim()) { $cfg = $raw | ConvertFrom-Json -ErrorAction Stop }
+        } catch {
+            Warn "Existing $DESKTOP_CFG was not valid JSON ($($_.Exception.Message)); replacing with a fresh one."
+            $cfg = $null
+        }
+    }
+    if (-not $cfg) { $cfg = [pscustomobject]@{} }
+
+    # Ensure mcpServers property exists. -contains works on PSCustomObject
+    # property name lists across PS 5.1 / 7 without method-call quirks.
+    $hasMcpServers = $false
+    if ($cfg.PSObject -and $cfg.PSObject.Properties) {
+        $hasMcpServers = ($cfg.PSObject.Properties.Name -contains "mcpServers")
+    }
+    if (-not $hasMcpServers) {
         $cfg | Add-Member -MemberType NoteProperty -Name "mcpServers" -Value (New-Object PSObject)
     }
+
     $launcherCmd = "powershell"
     $launcherArgs = @(
       "-NoProfile",
@@ -468,6 +490,7 @@ if ($script:ClaudeDesktopPresent) {
         args    = $launcherArgs
     }
     $cfg.mcpServers | Add-Member -MemberType NoteProperty -Name "tedplatform" -Value $entry -Force
+
     Write-Utf8NoBom -Path $DESKTOP_CFG -Content ($cfg | ConvertTo-Json -Depth 10)
     OK "Claude Desktop configured: $DESKTOP_CFG"
     $DESKTOP_CONFIGURED = $true
