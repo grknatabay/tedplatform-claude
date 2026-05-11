@@ -100,18 +100,50 @@ combined with tedplatform context. If unsure, just ask "what can you do here?"
 
 ## What gets installed
 
+### macOS / Linux
+
 | Path | Purpose |
 |---|---|
 | `~/.tedplatform/refresh-token` | Long-lived OAuth refresh token (chmod 600) |
-| `~/.tedplatform/get-mcp-token.sh` (or `.ps1`) | Exchanges refresh → fresh access token per session |
-| `~/.tedplatform/claude-mcp-launcher.sh` (or `.ps1`) | Wrapper invoked by Claude to start the MCP client |
+| `~/.tedplatform/get-mcp-token.sh` | Bash script: exchanges refresh → fresh access token per session |
+| `~/.tedplatform/claude-mcp-launcher.sh` | Bash wrapper invoked by Claude to start the MCP client |
 | `~/.claude/skills/tedplatform-publish/SKILL.md` | Orchestration guide loaded by Claude on session start |
-| `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) <br> `%APPDATA%\Claude\claude_desktop_config.json` (Windows) <br> `~/.config/Claude/claude_desktop_config.json` (Linux) | Claude Desktop MCP entry (merged, not overwritten) |
-| `~/.claude.json` (or `claude mcp add` user scope) | Claude Code CLI MCP entry |
+| `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) <br> `~/.config/Claude/claude_desktop_config.json` (Linux) | Claude Desktop MCP entry (merged, not overwritten) |
+| `~/.claude.json` | Claude Code CLI MCP entry (via `claude mcp add` user scope) |
 
-To uninstall: `rm -rf ~/.tedplatform ~/.claude/skills/tedplatform-publish` plus
-remove the `tedplatform` entry from your Claude Desktop config and run
-`claude mcp remove tedplatform` for the CLI.
+### Windows (PowerShell-free runtime)
+
+The runtime chain on Windows is `cmd.exe` → `node` → `npx.cmd`. PowerShell
+is used only by the installer itself (one-time, install-time). This was
+chosen after Windows PowerShell 5.1 / MSIX-sandboxed PowerShell spawn
+revealed seven distinct gotchas (BOM in JSON, here-string `n`-escape,
+`npx.ps1` `$LASTEXITCODE` bug, etc.) that made PS-runtime launchers
+unreliable when invoked by Claude Desktop.
+
+| Path | Purpose |
+|---|---|
+| `%USERPROFILE%\.tedplatform\refresh-token` | Long-lived OAuth refresh token |
+| `%USERPROFILE%\.tedplatform\token-fetcher.js` | Node script: exchanges refresh → fresh access token |
+| `%USERPROFILE%\.tedplatform\launcher.cmd` | Plain Windows batch wrapper Claude invokes via `cmd.exe /c` |
+| `%USERPROFILE%\.claude\skills\tedplatform-publish\SKILL.md` | Orchestration guide |
+| `%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\Claude\claude_desktop_config.json` (MSIX) <br> `%APPDATA%\Claude\claude_desktop_config.json` (classic Win32) | Claude Desktop MCP entry (path auto-detected from install type) |
+| `%USERPROFILE%\.claude.json` | Claude Code CLI MCP entry |
+
+### Uninstall
+
+```bash
+# macOS / Linux
+rm -rf ~/.tedplatform ~/.claude/skills/tedplatform-publish
+claude mcp remove tedplatform
+# plus delete the "tedplatform" entry from claude_desktop_config.json
+```
+
+```powershell
+# Windows
+Remove-Item -Recurse -Force "$env:USERPROFILE\.tedplatform","$env:USERPROFILE\.claude\skills\tedplatform-publish"
+claude mcp remove tedplatform
+# plus delete the "tedplatform" entry from claude_desktop_config.json
+```
 
 ---
 
