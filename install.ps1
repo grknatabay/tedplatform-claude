@@ -314,10 +314,18 @@ function Test-ClaudeDesktopInstalled {
 }
 
 function Ensure-ClaudeDesktop {
+    # Desktop is the GUI fallback. The CLI (`claude`) consumes the same
+    # MCP launcher + skill, so once it's installed Desktop is optional.
+    # Force-installing the GUI on top of a working CLI is a surprise app
+    # on the operator's machine.
     if (Test-ClaudeDesktopInstalled) {
         $kind = if ($script:ClaudeDesktopCfgDir -like "*\Packages\*") { "Microsoft Store / MSIX" } else { "Win32" }
         OK "Claude Desktop found ($kind - already installed, skipping)"
         $script:ClaudeDesktopPresent = $true
+        return
+    }
+    if (Get-Command claude -ErrorAction SilentlyContinue) {
+        Say "Claude Desktop install skipped (CLI already present - Desktop is optional)."
         return
     }
     Say "Claude Desktop not found - attempting install..."

@@ -158,6 +158,14 @@ ensure_claude_cli() {
 }
 
 ensure_claude_desktop() {
+  # Desktop is the GUI fallback. The CLI (`claude`) consumes the same MCP
+  # launcher + skill, so once it's installed Desktop is optional. Force-
+  # installing the GUI on top of a working CLI is wasted bandwidth + a
+  # surprise app on the operator's machine.
+  if command -v claude >/dev/null 2>&1; then
+    say "Claude Desktop install skipped (CLI already present — Desktop is optional)."
+    return 0
+  fi
   case "$OS" in
     Darwin)
       if [ -d "/Applications/Claude.app" ]; then
@@ -322,18 +330,30 @@ DESKTOP_CFG="$DESKTOP_DIR/claude_desktop_config.json"
 if [ "$DESKTOP_PRESENT" = "1" ]; then
   mkdir -p "$DESKTOP_DIR"
   [ -f "$DESKTOP_CFG" ] || echo '{}' > "$DESKTOP_CFG"
-  python3 - <<PY
+  # Heredoc is QUOTED (`<<'PY'`) so bash performs no $-expansion on the
+  # body — earlier versions used an unquoted heredoc with `'$DOTDIR'`
+  # concatenation tricks, which caused bash to (a) evaluate `$(...)` as
+  # a command substitution at install time and (b) trip set -u on the
+  # literal `${TOKEN}` we wanted to embed into the JSON. Both manifested
+  # as `bash: line ...: TOKEN: unbound variable`. Values are now passed
+  # in via env vars and consumed by Python with f-strings.
+  TEDP_DESKTOP_CFG="$DESKTOP_CFG" \
+  TEDP_DOTDIR="$DOTDIR" \
+  TEDP_MCP_URL="$MCP_URL" \
+  python3 - <<'PY'
 import json, os
-cfg_path = "$DESKTOP_CFG"
+cfg_path = os.environ["TEDP_DESKTOP_CFG"]
+dotdir   = os.environ["TEDP_DOTDIR"]
+mcp_url  = os.environ["TEDP_MCP_URL"]
 with open(cfg_path) as f:
     cfg = json.load(f)
 cfg.setdefault("mcpServers", {})
 cfg["mcpServers"]["tedplatform"] = {
-  "command": "/bin/bash",
-  "args": [
-    "-lc",
-    'TOKEN=$("'$DOTDIR'/get-mcp-token.sh") && exec npx -y mcp-remote "'$MCP_URL'" --header "Authorization: Bearer ${TOKEN}"'
-  ]
+    "command": "/bin/bash",
+    "args": [
+        "-lc",
+        f'TOKEN=$("{dotdir}/get-mcp-token.sh") && exec npx -y mcp-remote "{mcp_url}" --header "Authorization: Bearer ${{TOKEN}}"'
+    ]
 }
 with open(cfg_path, "w") as f:
     json.dump(cfg, f, indent=2)
